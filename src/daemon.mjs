@@ -123,7 +123,13 @@ function sessionFor(input, meta) {
   if (!s) {
     s = newSession(key, input, meta, NAME);
     s.pid = meta.pid ? resolveClaudePid(meta.pid) : null;
+    s.pidTriedAt = Date.now();
     sessions.set(key, s);
+  } else if (!s.pid && meta.pid && Date.now() - (s.pidTriedAt || 0) > 60000) {
+    // Without a PID the session can't be seen to exit (it would linger up to 12 h), so try
+    // again on later events, at most once a minute.
+    s.pidTriedAt = Date.now();
+    s.pid = resolveClaudePid(meta.pid);
   }
   return s;
 }
