@@ -1,3 +1,5 @@
 node_modules/
 *.log
 agent-deck.gitbundle
+test/live/.work/
+test/live/.pylib/
