@@ -94,6 +94,9 @@ export function newSession(key, input, meta, host) {
     subagents: {},
     pending: null,
     lastMessage: '',
+    transcript: input.transcript_path || null, // read by the daemon to spot answers given in the terminal
+    source: 'hooks',   // or 'discovered': found in ~/.claude/sessions with no hooks reporting (watch-only)
+    name: '',          // Claude Code's own title for the session, when it has one
     pid: meta.pid || null,
     tmuxPane: meta.tmuxPane || null,
     termProgram: meta.termProgram || null,
@@ -104,11 +107,16 @@ export function newSession(key, input, meta, host) {
   };
 }
 
+export function todosSummary(todos) {
+  const active = todos.find((t) => t.status === 'in_progress');
+  return { total: todos.length, done: todos.filter((t) => t.status === 'completed').length, active: active ? short(active.activeForm || active.content, 60) : '' };
+}
+
 function setStatus(s, status, ts) {
   if (ts >= s.statusTs) { s.status = status; s.statusTs = ts; }
 }
 
-function setStep(s, text, ts, tool) {
+export function setStep(s, text, ts, tool) {
   if (!text) return;
   if (ts >= s.stepTs) { s.step = text; s.stepTs = ts; }
   const last = s.steps[s.steps.length - 1];
@@ -126,6 +134,8 @@ export function applyEvent(s, event, input, meta) {
   if (meta.tmuxPane) s.tmuxPane = meta.tmuxPane;
   if (meta.termProgram) s.termProgram = meta.termProgram;
   if (input.cwd && !s.cwd) { s.cwd = input.cwd; s.project = base(input.cwd); }
+  if (input.transcript_path) s.transcript = input.transcript_path;
+  if (input.permission_mode) s.permissionMode = input.permission_mode; // Shift+Tab changes it mid-session
   s.dismissed = false;
 
   switch (event) {
@@ -148,11 +158,7 @@ export function applyEvent(s, event, input, meta) {
       const tool = input.tool_name;
       setStep(s, describeTool(tool, input.tool_input), ts, tool);
       if (tool !== 'AskUserQuestion' && !s.pending) setStatus(s, STATUS.WORKING, ts);
-      if (tool === 'TodoWrite' && Array.isArray(input.tool_input?.todos)) {
-        const todos = input.tool_input.todos;
-        const active = todos.find((t) => t.status === 'in_progress');
-        s.todos = { total: todos.length, done: todos.filter((t) => t.status === 'completed').length, active: active ? short(active.activeForm || active.content, 60) : '' };
-      }
+      if (tool === 'TodoWrite' && Array.isArray(input.tool_input?.todos)) s.todos = todosSummary(input.tool_input.todos);
       break;
     }
 
@@ -173,7 +179,8 @@ export function applyEvent(s, event, input, meta) {
 
     case 'Notification': {
       const type = input.notification_type;
-      if (type === 'permission_prompt' && !s.pending) {
+      // Claude Code sends permission_prompt for questions too; keep a question labelled as one.
+      if (type === 'permission_prompt' && !s.pending && s.status !== STATUS.QUESTION) {
         setStatus(s, STATUS.APPROVAL, ts);
         setStep(s, short(input.message || 'Needs your permission', 80), ts);
       } else if (type === 'idle_prompt' || type === 'agent_needs_input') {
@@ -244,10 +251,20 @@ export function progressOf(s) {
   return null;
 }
 
+function contextView(c, warnPercent) {
+  if (!c || !c.used || !c.window) return null;
+  const percent = Math.min(100, Math.round((c.used / c.window) * 100));
+  return { used: c.used, window: c.window, model: c.model || '', percent, warn: percent >= warnPercent };
+}
+
 // What the widget receives (no internal timestamps it doesn't need).
-export function publicView(s) {
+export function publicView(s, { warnPercent = 80 } = {}) {
   return {
-    key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.title,
+    context: contextView(s.context, warnPercent),
+    // Claude Code's own session name reads better than the first prompt (which can be a paste).
+    key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.name || s.title,
+    watchOnly: s.source === 'discovered',
+    permissionMode: s.permissionMode || null,
     status: s.status, step: s.step, steps: s.steps.slice(-10), progress: progressOf(s),
     background: s.background, subagents: Object.entries(s.subagents).map(([id, a]) => ({ id, ...a })),
     pending: s.pending ? { ...s.pending, resolve: undefined } : null,

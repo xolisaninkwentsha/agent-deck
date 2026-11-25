@@ -4,9 +4,16 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('deck', {
   config: () => ipcRenderer.invoke('config'),
   onConfigChanged: (fn) => ipcRenderer.on('config-changed', (_e, cfg) => fn(cfg)),
+  onApprovals: (fn) => ipcRenderer.on('approvals', (_e, enabled) => fn(enabled)), // changed from the tray
   resize: (height) => ipcRenderer.send('resize', height),
   setApprovals: (enabled) => ipcRenderer.send('set-approvals', enabled),
-  notify: (title, body) => ipcRenderer.send('notify', { title, body }),
+  saveSettings: (patch) => ipcRenderer.send('save-settings', patch),
+  openLink: (url) => ipcRenderer.send('open-link', url), // main only opens http(s) links
+  addHub: (name, address, token) => ipcRenderer.invoke('add-hub', { name, address, token }), // validated in main
+  removeHub: (name) => ipcRenderer.send('remove-hub', name),
+  copyShareLine: () => ipcRenderer.send('copy-share-line'),
+  notify: (title, body, target) => ipcRenderer.send('notify', { title, body, target }),
+  onJump: (fn) => ipcRenderer.on('jump', (_e, target) => fn(target)), // a notification was clicked
   quit: () => ipcRenderer.send('quit'),
   minimize: () => ipcRenderer.send('minimize'),
 });

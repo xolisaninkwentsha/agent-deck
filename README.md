@@ -39,7 +39,7 @@ agent-deck widget           # opens the panel
 agent-deck autostart        # optional: open the panel when you log in
 ```
 
-Then **restart any Claude Code sessions that were already open**. Hooks are read when a session starts, so older sessions won't appear until they're restarted.
+Sessions that were already open show up straight away as **watch only** (see below). Hooks are read when a session starts, so restart a session to answer its approvals and questions from the panel.
 
 ## See the Ubuntu machine from the Mac (or the other way round)
 
@@ -55,25 +55,173 @@ It prints something like:
 agent-deck add-hub ubuntu ws://100.101.102.103:47615 <token>
 ```
 
-Run that on the Mac. The panel picks it up within a few seconds, and each card shows a small machine label.
+On the Mac, open the panel's **Settings → Other machines**, paste that whole line into any field of **Add a machine** (it fills in the name, address and token), and click **Add**. Or run the line in a terminal. The panel connects within a few seconds, and each card shows a small machine label. **Remove** in the same list disconnects it.
+
+On the shared machine, **Settings → This machine** shows the address it's shared on, and **Copy line** copies that line again (token included, so treat it like a password).
 
 - Use **Tailscale** or your office LAN. Don't expose the port to the internet: the connection isn't encrypted by Agent Deck itself (Tailscale encrypts it).
-- To share on one interface only: `agent-deck share 100.101.102.103` (your Tailscale IP).
+- Web pages in your browser can't talk to the daemon: requests that come with a browser's `Origin` header (other than the panel's own) are refused, and hooks and agents can only report from this machine.
+- To share on one interface only: `agent-deck share 100.101.102.103` (your Tailscale IP). The daemon still listens on 127.0.0.1 for this machine's own hooks and panel.
+- Addresses can be given as `100.101.102.103`, `host:port` or `ws://host:port`; the port defaults to 47615.
 - `agent-deck unshare` makes the machine local-only again.
 - Answering approvals for the remote machine works the same as local.
 
 ## Approvals and questions: how the hand-off works
 
-When Claude Code is about to ask for permission (or asks a question), the daemon holds the request and shows it on the card.
+When Claude Code asks for permission, asks for a plan approval, or asks you a question, the card shows it with buttons.
 
-- If you answer in the panel, Claude Code continues straight away and the terminal never prompts.
-- If you don't answer within **90 seconds** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the normal prompt appears in the terminal.
+- **Claude Code shows its normal prompt in the terminal at the same time**, so answer wherever you are. If you answer in the panel, the terminal prompt closes and Claude carries on.
+- For questions this holds in the default, accept-edits, plan and auto permission modes (checked with Claude Code 2.1.332). In any other mode (for example bypass permissions) the panel gets the question *first*, and the terminal only shows it after you click **Terminal** or the hold runs out.
+- If you answer in the terminal instead, the card clears by itself within a couple of seconds.
+- If nobody answers in the panel within **5 minutes** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer. (A question in a mode where the panel gets it first is held for at most 90 seconds.)
 - If no panel is open, nothing is held: Claude Code behaves exactly as before.
 - The **shield** button in the panel header turns this off. With it off, the panel only watches and every prompt goes to the terminal.
 
-The trade-off: while the shield is on, a prompt shows up in the panel *first*. If you're sitting at that terminal, click **Terminal** on the card (or turn the shield off) to answer there.
-
 "Always" applies the rule Claude Code suggests (for example "always allow `npm run test`"), the same as choosing "Yes, don't ask again" in the terminal.
+
+## Service agents
+
+Long-running agents that aren't Claude Code sessions (scheduled jobs, chat bots) get their own **Agents** section below the sessions. Each card shows:
+
+- whether it's idle, working, **waiting on you**, in **error**, or **not responding**;
+- the job and step it's on, or the next scheduled job;
+- how many items are waiting on you;
+- how its last job went.
+
+Click a card to see the waiting items as links (they open in the browser: the Chat thread or email where you answer), the recent jobs, the last error and the schedule. **The panel doesn't approve anything for these agents**; approvals stay where the agent asks for them.
+
+An agent reports with the tiny Python client in `clients/python/agent_deck.py`. It uses only the standard library: copy it into the agent's repo. It never raises and never blocks; if Agent Deck isn't running, events are dropped.
+
+```python
+from agent_deck import Deck
+deck = Deck("finance-agent")
+deck.start("Billing and collections", heartbeat=60)   # in the long-running process only
+with deck.job("daily") as job:                        # job_start / job_end (error if it raises)
+    deck.step("Matching payments")
+    deck.waiting("bill-42", "Approve supplier bill 42", "https://chat.google.com/...")
+    job.summary = "3 reminders sent"
+deck.resolved("bill-42")
+deck.error("Xero sign-in expired")
+```
+
+- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification). `start(..., timer=False)` plus `deck.heartbeat()` from the agent's own main loop catches a hung loop; the default timer thread only proves the process is alive. Beat in **every** wait of the loop, back-off sleeps after errors included, or a loop that backs off for minutes reads as hung.
+- **Two kinds of process:** typically a long-running process (heartbeat, chat) and short scheduled jobs. Call `start()` only in the long-running command (e.g. `chat-watch`), never in setup that cron jobs share, or each cron run counts as a restart. Restarting the long-running one keeps jobs that cron started and the last error. A job that never reports its end is marked failed after `agentJobMaxHours` (12).
+- **Sleep:** while this machine is suspended nothing can arrive, so after waking the heartbeat clocks move on by the time asleep instead of flagging every agent.
+- **What's waiting:** `deck.waiting_set([...])` sends the complete list of open items and replaces the panel's, so a lost `resolved` can't leave a stale item.
+- **Privacy:** keep titles and messages short, with no names, amounts or email text. They're stored in `~/.agent-deck/state.json`, shown in notifications and on any panel the machine is shared with. A failed job reports only the exception's type, never its message.
+- **Tests:** `AGENT_DECK_DISABLE=1` turns the client off, so an agent's own test suite doesn't post to your panel.
+- **Schedule:** the daemon reads your crontab and lists the lines that run in the agent's working folder (`python -m <package> <job>`), with their next run. An agent can also send its own (`deck.schedule([(job, next_run), ...])`).
+- **Under the hood:** `POST http://127.0.0.1:47615/agent` with JSON `{agent, event, ...}`; only requests from this machine are accepted. Events: `start` (name, description, heartbeat, cwd), `heartbeat`, `job_start` (job, detail), `step` (text), `job_end` (job, result ok|error, summary), `waiting` (id, title, link), `resolved` (id), `schedule` (list of {job, next_run}), `error` (message).
+- **To see it** without real agents: `node test/demo.mjs` adds two demo agents (one waiting on you, one that stops responding).
+
+## OpenTelemetry agents
+
+Any agent that exports OpenTelemetry over OTLP/HTTP shows up as a service-agent card, one per `service.name`, marked **OTLP**. The daemon listens on **`localhost:4318`**, the exporters' default endpoint, so the standard SDK setup works unchanged. It accepts `/v1/traces`, `/v1/metrics` and `/v1/logs`, in protobuf or JSON, optionally gzip.
+
+- **Access:** only programs on this machine are accepted, even when the daemon is shared with another computer. Requests from web pages are refused.
+- **Settings:** `otlpPort` changes the port (`0` turns it off). Claude Code's own telemetry (`service.name` `claude-code`) is ignored, since its sessions already have cards (`otlpIgnoreServices`).
+
+Python setup, the standard SDK and exporter (`pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`):
+
+```python
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+
+resource = Resource.create({"service.name": "finance-agent", "service.version": "1.4.0"})
+tracer_provider = TracerProvider(resource=resource)
+tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))      # http://localhost:4318
+tracer = tracer_provider.get_tracer("finance-agent")
+
+# In the long-running command only (e.g. chat-watch), not in setup that cron jobs share: the main loop's own pulse.
+meter_provider = MeterProvider(resource=resource, metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter())])
+heartbeat = meter_provider.get_meter("finance-agent").create_counter("agent.heartbeat")
+# ...each time round the main loop, and in every wait (back-off sleeps after errors too): heartbeat.add(1)
+
+# A job: mark it, and put job.name on its child spans too so it shows while it runs.
+with tracer.start_as_current_span("invoke_agent daily", attributes={"job.name": "daily", "gen_ai.operation.name": "invoke_agent"}):
+    with tracer.start_as_current_span("chat claude-sonnet-5-5", attributes={"job.name": "daily", "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": "claude-sonnet-5-5"}) as s:
+        response = client.messages.create(...)
+        s.set_attribute("gen_ai.usage.input_tokens", response.usage.input_tokens)
+        s.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+    with tracer.start_as_current_span("execute_tool xero_lookup", attributes={"job.name": "daily", "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": "xero_lookup"}) as s:
+        ...
+        s.add_event("waiting", {"waiting.id": "bill-42", "waiting.title": "Approve supplier bill", "url.full": thread_url})
+```
+
+What the card reads:
+
+| Card shows | Comes from |
+| --- | --- |
+| **Jobs** | spans marked with `job.name` (or `gen_ai.operation.name = invoke_agent`). The job ends when its root span arrives: ok, or failed with `error.type` / the exception's type. Its child spans show it as running, with the **last tool** that finished (`gen_ai.tool.name`). Standalone model calls aren't jobs. |
+| **Waiting on you** | span events (or log events) named `waiting`, `approval.requested` or `human_input.requested`, with `waiting.id`/`approval.id`, `waiting.title`/`approval.title` and a link in `url.full`/`link`. Events named `resolved`, `approval.granted`, `approval.denied` or `human_input.received` with the same id remove them. Otherwise they disappear after 7 days. |
+| **Tokens today** | `gen_ai.usage.input_tokens`/`output_tokens` (older `prompt_tokens`/`completion_tokens` work too), per model. `invoke_agent` totals aren't counted twice. |
+| **Not responding** | a metric named `*heartbeat*` that hasn't **gone up** for 3 minutes (`otlpHeartbeatSeconds` × 3), with a notification. Because the SDK exports from its own thread, a hung main loop keeps exporting the same value; that counts as not responding. Use a counter: a gauge counts as alive whenever it's exported. Delta export (`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta`) works too: there, any increase since the last export is alive. |
+| **Error** | failed jobs and ERROR log records (by type only). **3+ restarts in 10 minutes** (seen as a new heartbeat start time or `service.instance.id`) shows "restarting repeatedly", which catches a crash loop that systemd keeps restarting. With delta export the start time changes on every export, so only `service.instance.id` counts: the Python SDK sets one per process; with other SDKs, set one at start-up (a fresh UUID). |
+
+- **Waiting events:** spans are exported only when they end, so put a waiting event on a short span (as above), not on the job's own span, or it only appears when the whole job finishes.
+- **GenAI names:** the GenAI conventions are still in development. Newer names are tried first and older ones are accepted; a missing attribute just means less detail.
+- **Metadata only:** the receiver never stores span or status messages, log bodies, or `gen_ai.*` message content. Still, don't send what you don't need: leave `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` off, and keep titles to the kind of item, with no names or amounts.
+
+## Sessions that started before Agent Deck
+
+Claude Code keeps a small file per running session in `~/.claude/sessions/`, with its folder, its title and whether it's busy, idle or waiting for you. The daemon reads these every 2 seconds:
+
+- **Sessions without hooks** (started before `agent-deck install`, or with hooks pointing elsewhere) get a card marked **watch only**. It shows the session's title, status (including "Needs approval in the terminal"), the step it's on (from the end of its transcript) and task progress. Answer those prompts in the terminal; restart the session to answer from the panel. The card turns into a normal one as soon as the session's hooks report.
+- **All cards** use Claude Code's own session title, which reads better than the first prompt.
+- It also confirms when you've answered a prompt in the terminal, so the panel's card clears even when no hook event follows (for example "Yes" on a long-running command, or feedback on a plan).
+
+The file isn't a documented Claude Code format (checked with 2.1.332). If it changes, those extras stop and the rest of Agent Deck works as before.
+
+## Show, hide, tray
+
+- **Ctrl+Alt+A** shows or hides the panel (`shortcut` in the config). The panel remembers whether it was hidden.
+- **Tray icon** (top bar on Ubuntu): show/hide the panel, turn "Answer approvals here" on or off (the same as the shield), quit.
+- **Esc** collapses the panel to its header; the ^ button opens it again.
+- `agent-deck toggle | show | hide` does the same from a terminal or script.
+- **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `agent-deck shortcut` once. It adds a GNOME custom shortcut ("Agent Deck" in Settings > Keyboard > Custom Shortcuts) that runs `agent-deck toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `agent-deck shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
+
+## Permission mode
+
+A card shows a small badge when a session isn't in the default permission mode: **accept edits**, **plan**, **auto**, **don't ask**, or **bypass** (red: Claude Code won't ask before running tools, so no approvals will come). It follows Shift+Tab changes from the next thing the session does. Watch-only sessions don't show it, because only hooks report the mode.
+
+## Settings
+
+The **gear** in the panel header opens the settings; Esc or the gear goes back.
+
+- Answer approvals and questions here (the same as the shield)
+- How long the panel can answer a prompt: 1, 2, 5 or 9 minutes. This setting belongs to this machine's daemon, applies to new prompts straight away, and doesn't change other machines.
+- Notifications on/off, and how long a session must work before "Done, your turn" notifies
+- Context warning threshold
+- Theme: System (follows the desktop), Dark or Light
+- The show/hide shortcut (read-only; `agent-deck shortcut` sets it up on GNOME)
+
+Each change is saved to `~/.agent-deck/config.json` immediately.
+
+## Notifications
+
+The panel sends a desktop notification when:
+
+- a prompt is waiting in the panel (an approval, a plan or a question);
+- a session needs you **in the terminal** (no panel hold: watch-only sessions, approvals turned off, or a prompt handed back);
+- a session **finishes** after working for at least `notifyAfterSeconds` (30 s by default, so quick replies stay quiet);
+- a session stops with an error.
+
+At most one notification per session every 10 seconds. **Clicking** one shows the panel and jumps to the session (its tmux pane or VS Code window). Turn them off with **Notifications** in the tray menu (`notifications` in the config).
+
+## Context meter
+
+Each card shows how full the session's context window is (`ctx 59%`; hover for the token count and model). It turns amber from `contextWarnPercent` (80% by default) and red from 95%.
+
+- The number is the input, cache-write and cache-read tokens of the session's latest message, which is what its next request sends. Subagents don't count.
+- Transcripts don't say which window a session has, so it's worked out from the model: 1M for current models (Opus 5.x and 4.6–4.8, Sonnet 5.x and 4.6, Haiku 5.x, Fable, Mythos), 200K otherwise. Anything using more than 200K is counted against 1M. If a guess is wrong, set `contextWindows` in the config, e.g. `{"claude-opus-5-5": 1000000}`.
+- After `/compact` the meter shows what the next message really sends. On a short conversation that can be *more* than before, because the summary and re-attached context are added.
 
 ## Ubuntu notes
 
@@ -81,7 +229,8 @@ The trade-off: while the shield is on, a prompt shows up in the panel *first*. I
   `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox`
 - The panel draws without the GPU sandbox on Linux, because the GPU process crashes on recent Ubuntu and leaves the window invisible. `AGENT_DECK_GPU=1` restores Electron's defaults. If the panel ever doesn't appear, `bash test/try-display.sh` tries the alternatives.
 
-- Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this. If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `AGENT_DECK_WAYLAND=1` to try native Wayland.
+- Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this: `agent-deck widget` and autostart start Electron with `--ozone-platform=x11`, and if you start `electron widget/main.cjs` yourself without it, the panel restarts itself once with it. (Setting it from inside the app has no effect in Electron 45.) If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `AGENT_DECK_WAYLAND=1` to try native Wayland. Native Wayland can't stay on top, and its position can't be set or remembered.
+- Drag the panel anywhere, on either screen; it opens there next time (top right of the main screen the first time).
 - "Jump to session" switches tmux panes and focuses VS Code. For other terminals on Linux it can't raise the window yet.
 
 ## Commands
@@ -89,6 +238,8 @@ The trade-off: while the shield is on, a prompt shows up in the panel *first*. I
 ```
 agent-deck install | uninstall
 agent-deck widget | autostart [off]
+agent-deck toggle | show | hide          # the running panel
+agent-deck shortcut [off]                # GNOME: Ctrl+Alt+A everywhere
 agent-deck status
 agent-deck share [ip] | unshare
 agent-deck add-hub <name> <ws://host:port> <token> | remove-hub <name>
@@ -102,10 +253,21 @@ agent-deck start | stop | restart        # the daemon
 | `port` | 47615 | daemon port |
 | `bind` | `127.0.0.1` | set by `share` |
 | `token` | none | set by `share`; other machines need it |
-| `holdSeconds` | 90 | how long a prompt waits in the panel before going to the terminal |
+| `holdSeconds` | 300 | how long the panel can answer a prompt (the terminal shows it meanwhile); max 570 |
 | `name` | hostname | machine label on cards |
 | `hubs` | `[]` | other machines this panel shows (managed by `add-hub`) |
 | `approvalsInWidget` | true | the shield button |
+| `shortcut` | `Control+Alt+A` | shows/hides the panel |
+| `shortcutVia` | none | `gnome` after `agent-deck shortcut` (the panel then doesn't grab the key) |
+| `theme` | `system` | `system`, `dark` or `light` |
+| `notifications` | true | desktop notifications (also in the tray menu) |
+| `notifyAfterSeconds` | 30 | "Done, your turn" only after this much work |
+| `otlpPort` | 4318 | OpenTelemetry receiver on localhost (0 = off) |
+| `otlpHeartbeatSeconds` | 60 | an OTLP agent's heartbeat must advance within 3× this |
+| `otlpWaitingTtlHours` | 168 | waiting items an OTLP agent never resolves disappear after this |
+| `otlpIgnoreServices` | `["claude-code"]` | `service.name` values not shown |
+| `contextWarnPercent` | 80 | context meter turns amber from here |
+| `contextWindows` | `{}` | context window per model-id prefix, if the built-in guess is wrong |
 
 ## Try it without real agents
 
@@ -117,7 +279,7 @@ node test/demo.mjs          # four fake sessions, one approval, one question. Ct
 ## Tests
 
 ```bash
-npm test                    # 13 end-to-end checks: hook script -> daemon -> fake panel
+npm test                    # end-to-end checks: hook script -> daemon -> fake panel
 ```
 
 ## Uninstall

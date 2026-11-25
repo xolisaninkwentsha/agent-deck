@@ -19,17 +19,42 @@ export const DEFAULTS = {
   bind: '127.0.0.1',
   // Shared secret that remote widgets must present. Required when bind is not loopback.
   token: null,
-  // How long a permission request or question waits for an answer in the panel
-  // before falling back to the normal prompt in the terminal.
-  holdSeconds: 90,
+  // How long the panel can answer a permission request or question. Claude Code shows the
+  // same prompt in the terminal meanwhile; after this only the terminal can answer. Max 570.
+  holdSeconds: 300,
   // Name shown on this machine's cards. Defaults to the hostname.
   name: null,
+  // OpenTelemetry receiver (OTLP/HTTP) for agents that export telemetry; always 127.0.0.1/::1 only.
+  // 4318 is the exporters' default endpoint. 0 turns it off.
+  otlpPort: 4318,
+  // An agent's heartbeat metric must advance within 3x this many seconds, or it's "not responding".
+  otlpHeartbeatSeconds: 60,
+  // Items waiting on you that an agent never resolves disappear after this long.
+  otlpWaitingTtlHours: 168,
+  // service.name values to ignore (Claude Code's own telemetry would duplicate the session cards).
+  otlpIgnoreServices: ['claude-code'],
+  // Context meter on each card: warn (amber) from this percentage of the window.
+  contextWarnPercent: 80,
+  // Context window per model-id prefix, if the built-in guess is wrong, e.g. {"claude-opus-5-5": 1000000}.
+  contextWindows: {},
   // Widget only: daemons to connect to. The local one is always included.
   hubs: [],
   // Widget only: let the panel answer approvals and questions.
   approvalsInWidget: true,
   // Widget only: remembered window position.
   window: null,
+  // Widget only: key that shows/hides the panel (Electron accelerator syntax).
+  shortcut: 'Control+Alt+A',
+  // 'gnome' once `agent-deck shortcut` made GNOME run it; the panel then doesn't grab it itself.
+  shortcutVia: null,
+  // Widget only: hidden with the tray icon / shortcut when it last closed.
+  panelHidden: false,
+  // Widget only: 'system', 'dark' or 'light'.
+  theme: 'system',
+  // Widget only: desktop notifications (also in the tray menu).
+  notifications: true,
+  // Widget only: "Done, your turn" only after a session worked at least this long.
+  notifyAfterSeconds: 30,
 };
 
 export function ensureHome() {
@@ -65,6 +90,37 @@ export function isLoopback(addr) {
 
 export function newToken() {
   return crypto.randomBytes(24).toString('base64url');
+}
+
+// ---------- other machines' daemons ("hubs"), for `agent-deck add-hub` and the panel's settings ----------
+// Address: "100.101.102.103", "host:47615", "ws://host:47615" or "wss://…"; the port defaults to 47615.
+export function hubUrl(input) {
+  let s = String(input || '').trim();
+  if (!s || /\s/.test(s)) return null;
+  if (!/^[a-z]+:\/\//i.test(s)) s = 'ws://' + s;
+  let u;
+  try { u = new URL(s); } catch { return null; }
+  if ((u.protocol !== 'ws:' && u.protocol !== 'wss:') || !u.hostname || u.username || u.password || u.search || u.hash) return null;
+  if (u.pathname !== '/' && u.pathname !== '/ws') return null;
+  return `${u.protocol}//${u.hostname}:${u.port || DEFAULTS.port}`; // hostname keeps IPv6 brackets
+}
+// Returns { ok, hubs } or { ok: false, error } in words the panel can show.
+export function addHub(name, address, token) {
+  name = String(name || '').trim();
+  token = String(token || '').trim();
+  if (!/^[A-Za-z0-9._-]{1,40}$/.test(name)) return { ok: false, error: 'Name: letters, digits, dot, dash or underscore' };
+  const url = hubUrl(address);
+  if (!url) return { ok: false, error: 'Address: an IP or host name, optionally with :port (or ws://host:port)' };
+  if (token && !/^[A-Za-z0-9._~+/=-]{8,200}$/.test(token)) return { ok: false, error: 'Token: paste it exactly as "agent-deck share" printed it' };
+  const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name);
+  hubs.push({ name, url, token: token || null });
+  saveConfig({ hubs });
+  return { ok: true, hubs };
+}
+export function removeHub(name) {
+  const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name);
+  saveConfig({ hubs });
+  return { ok: true, hubs };
 }
 
 export function tokensMatch(a, b) {

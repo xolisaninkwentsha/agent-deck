@@ -14,6 +14,7 @@ const ICONS = {
   down: '<svg viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6"/></svg>',
   jump: '<svg viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 5 11M3 6v7h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+  gear: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
 };
 
 const state = {
@@ -23,7 +24,107 @@ const state = {
   expanded: new Set(), // session keys with details open
   seenPending: new Set(),
   drafts: {},          // pendingId -> { answers: {question: [labels]}, other: {question: text} }
+  composing: false,    // an input method (IME) is composing text in an answer box
+  seen: new Map(),     // session key -> { status, since, pending } from the last snapshot
+  seenAgents: new Map(), // agent key -> { status, waiting: Set(ids) } from the last snapshot
+  notified: new Map(), // session key -> time of its last notification
+  notifyAfter: 30,     // seconds of work before "Done, your turn" is worth a notification
+  settingsOpen: false,
+  cfg: {},             // panel settings from the main process (rendererConfig in main.cjs)
+  hubDraft: { name: '', address: '', token: '', error: '' }, // the "Add a machine" form
 };
+
+// ---------- settings ----------
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme; // System: follow the desktop
+}
+function applyConfig(cfg) {
+  state.cfg = cfg;
+  state.settingsDirty = true;
+  state.notifyAfter = cfg.notifyAfterSeconds || 30;
+  applyTheme(cfg.theme);
+}
+function saveSetting(patch) {
+  window.deck.saveSettings(patch);
+  applyConfig({ ...state.cfg, ...patch });
+  render();
+}
+const prettyKey = (accel) => String(accel || '').replace(/Control|CommandOrControl|CmdOrCtrl/g, 'Ctrl');
+
+function settingsView() {
+  const c = state.cfg;
+  const row = (label, hint, control) => h('div', { class: 'set-row' },
+    h('div', { class: 'set-label' }, h('div', { text: label }), hint ? h('div', { class: 'set-hint', text: hint }) : null), control);
+  const toggle = (on, onChange) => h('button', { class: 'switch' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(on), onclick: () => onChange(!on) }, h('span', { class: 'knob' }));
+  const select = (value, options, onChange, unit = '') => {
+    if (!options.some(([v]) => String(v) === String(value))) options = [[value, String(value) + unit], ...options]; // a value set by hand
+    return h('select', {
+      class: 'set-select',
+      onchange: (e) => { const v = e.target.value; onChange(/^\d+$/.test(v) ? Number(v) : v); },
+    }, options.map(([v, label]) => h('option', { value: String(v), text: label, selected: String(v) === String(value) })));
+  };
+  const linuxNoGnome = c.platform === 'linux' && c.shortcutVia !== 'gnome';
+  return h('div', { class: 'settings' },
+    row('Answer approvals and questions here', 'Off: the panel only watches', toggle(state.approvals, (v) => setApprovals(v, true))),
+    row('Panel can answer for', 'The terminal shows the prompt meanwhile. This machine only.',
+      select(c.holdSeconds, [[60, '1 min'], [120, '2 min'], [300, '5 min'], [540, '9 min']], (v) => saveSetting({ holdSeconds: v }), ' s')),
+    row('Notifications', null, toggle(c.notifications !== false, (v) => saveSetting({ notifications: v }))),
+    row('Notify "done" after', 'of work, so quick replies stay quiet',
+      select(c.notifyAfterSeconds, [[10, '10 s'], [30, '30 s'], [60, '1 min'], [120, '2 min']], (v) => saveSetting({ notifyAfterSeconds: v }), ' s')),
+    row('Context warning at', null, select(c.contextWarnPercent, [[70, '70%'], [80, '80%'], [90, '90%']], (v) => saveSetting({ contextWarnPercent: v }), '%')),
+    row('Theme', null, select(c.theme || 'system', [['system', 'System'], ['dark', 'Dark'], ['light', 'Light']], (v) => saveSetting({ theme: v }))),
+    row('Show/hide shortcut', linuxNoGnome ? 'Run "agent-deck shortcut" so it works in every app' : null,
+      h('span', { class: 'set-value', text: c.shortcut ? prettyKey(c.shortcut) + (c.shortcutVia === 'gnome' ? ' (GNOME)' : '') : 'none' })),
+    ...machinesView(row));
+}
+
+// Other machines whose sessions and agents this panel shows ("hubs"), and how to share this one.
+// The typed form lives in state.hubDraft, so a settings rebuild doesn't lose it.
+const ADD_HUB_LINE = /^\s*(?:agent-deck\s+add-hub\s+)?([A-Za-z0-9._-]+)\s+(wss?:\/\/\S+)\s+(\S+)\s*$/;
+function machinesView(row) {
+  const d = state.hubDraft;
+  const field = (key, placeholder) => h('input', {
+    class: 'set-input', 'data-field': key, placeholder, value: d[key], spellcheck: 'false', autocomplete: 'off',
+    oninput: (e) => {
+      const line = ADD_HUB_LINE.exec(e.target.value); // the whole line from "agent-deck share" pasted anywhere
+      if (line) {
+        [d.name, d.address, d.token] = line.slice(1);
+        for (const k of ['name', 'address', 'token']) document.querySelector(`.set-input[data-field="${k}"]`).value = d[k];
+      } else d[key] = e.target.value;
+    },
+    onkeydown: (e) => { if (e.key === 'Enter') addMachine(); },
+  });
+  const remotes = state.hubs.filter((x) => !x.local);
+  const shared = state.cfg.shareAddress;
+  return [
+    h('div', { class: 'section-head', text: 'Other machines' }),
+    ...remotes.map((x) => row(x.name, `${x.url.replace(/\/ws$/, '')} · ${x.connected ? 'connected' : 'not connected'}`,
+      h('button', { class: 'btn ghost', text: 'Remove', onclick: () => window.deck.removeHub(x.name) }))),
+    h('div', { class: 'set-row add-hub' },
+      h('div', { class: 'set-label' },
+        h('div', { text: 'Add a machine' }),
+        h('div', { class: 'set-hint', text: 'Paste the line "agent-deck share" printed on it, or fill in its name, address and token.' }),
+        h('div', { class: 'add-fields' }, field('name', 'name'), field('address', 'address, e.g. 100.101.102.103'), field('token', 'token')),
+        d.error ? h('div', { class: 'set-error', text: d.error }) : null),
+      h('button', { class: 'btn allow', text: 'Add', onclick: addMachine })),
+    row('This machine', shared ? `Shared on ${shared}. Copy the line and paste it into the other panel.` : 'Not shared. Run "agent-deck share <Tailscale IP>" to let another panel see it.',
+      shared ? h('button', { class: 'btn', text: d.copied ? 'Copied' : 'Copy line', onclick: () => copied(true) }) : null),
+  ];
+}
+function copied(yes) {
+  if (yes) { window.deck.copyShareLine(); setTimeout(() => copied(false), 2000); }
+  state.hubDraft.copied = yes;
+  state.settingsDirty = true;
+  render();
+}
+async function addMachine() {
+  const d = state.hubDraft;
+  const r = await window.deck.addHub(d.name, d.address, d.token);
+  state.hubDraft = r.ok ? { name: '', address: '', token: '', error: '' } : { ...d, error: r.error };
+  state.settingsDirty = true;
+  render();
+}
 
 // ---------- tiny DOM helper ----------
 function h(tag, props, ...children) {
@@ -56,6 +157,7 @@ function connect(hub) {
   hub.ws = ws;
   ws.onopen = () => {
     hub.connected = true; hub.retry = 0;
+    state.settingsDirty = true; // "connected" in Settings → Other machines
     ws.send(JSON.stringify({ type: 'hello', approvals: state.approvals }));
     render();
   };
@@ -63,13 +165,17 @@ function connect(hub) {
     let msg; try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === 'snapshot') {
       hub.sessions = msg.sessions || [];
+      hub.agents = msg.agents || [];
       if (msg.host) hub.host = msg.host;
       notifyNewPending(hub);
+      notifyAgents(hub); // before notifyChanges, which marks the hub primed
+      notifyChanges(hub);
       render();
     }
   };
   ws.onclose = () => {
-    hub.connected = false; hub.sessions = [];
+    if (hub.connected) state.settingsDirty = true;
+    hub.connected = false; hub.sessions = []; hub.agents = []; hub.primed = false;
     render();
     if (!hub.removed) scheduleReconnect(hub);
   };
@@ -102,20 +208,70 @@ function notifyNewPending(hub) {
     if (!p || state.seenPending.has(p.id)) continue;
     state.seenPending.add(p.id);
     const what = p.kind === 'question' ? (p.questions?.[0]?.question || 'Claude has a question') : `${p.title}: ${p.detail || ''}`;
-    window.deck.notify(`${s.project}${hub.local ? '' : ' · ' + hub.name}`, what);
+    state.notified.set(s.key, Date.now());
+    window.deck.notify(`${s.project}${hub.local ? '' : ' · ' + hub.name}`, what, { key: s.key, hubUrl: hub.url });
   }
+}
+
+// Service agents: notify when one stops responding, errors, or puts something new in front of you.
+// A click on "needs you" opens the item's link (a Chat thread or email).
+function notifyAgents(hub) {
+  const now = Date.now();
+  for (const a of hub.agents || []) {
+    // An agent that turns up after the first snapshot is new: everything it has is news.
+    const prev = state.seenAgents.get(a.key) || { status: null, waiting: new Set() };
+    const ids = new Set(a.waiting.map((w) => w.id));
+    state.seenAgents.set(a.key, { status: a.status, waiting: ids });
+    if (!hub.primed) continue;
+    let body = null, target = { key: a.key, hubUrl: hub.url };
+    const fresh = a.waiting.filter((w) => !prev.waiting?.has(w.id));
+    if (a.status === 'not_responding' && prev.status !== 'not_responding') body = `Isn't responding: no heartbeat for ${ago(a.lastHeartbeat)}`;
+    else if (a.status === 'error' && prev.status !== 'error') body = a.lastError?.message || 'Stopped with an error';
+    else if (fresh.length) { body = `Needs you: ${fresh[0].title}` + (fresh.length > 1 ? ` (+${fresh.length - 1} more)` : ''); target = { link: fresh[0].link }; }
+    if (!body || now - (state.notified.get(a.key) || 0) < 10000) continue;
+    state.notified.set(a.key, now);
+    window.deck.notify(`${a.displayName}${hub.local ? '' : ' · ' + hub.name}`, body, target);
+  }
+}
+
+// Notify when a session finishes a real stretch of work, needs you in the terminal, or errors.
+// The first snapshot from a hub only records where things stand, so reconnecting is quiet.
+function notifyChanges(hub) {
+  const now = Date.now();
+  for (const s of hub.sessions) {
+    const prev = state.seen.get(s.key);
+    if (!prev || prev.status !== s.status) state.seen.set(s.key, { status: s.status, since: now, pending: Boolean(s.pending) });
+    else prev.pending = Boolean(s.pending);
+    if (!hub.primed || !prev || prev.status === s.status) continue;
+    let body = null;
+    if (prev.status === 'working' && (s.status === 'idle' || s.status === 'background')) {
+      if (now - prev.since >= state.notifyAfter * 1000) body = 'Done, your turn' + (s.lastMessage ? ': ' + s.lastMessage.slice(0, 140) : '');
+    } else if ((s.status === 'approval' || s.status === 'question') && !s.pending && !prev.pending) {
+      const what = String(s.step || '').replace(/^(question )?waiting in the terminal:?\s*/i, '').replace(/^needs approval in the terminal$/i, '');
+      body = (s.status === 'question' ? 'Question for you in the terminal' : 'Needs your approval in the terminal') + (what ? `: ${what}` : '');
+    } else if (s.status === 'error') {
+      body = s.step || 'Stopped with an error';
+    }
+    if (!body || now - (state.notified.get(s.key) || 0) < 10000) continue;
+    state.notified.set(s.key, now);
+    const name = `${s.project}${s.title ? ' · ' + s.title : ''}${hub.local ? '' : ' · ' + hub.name}`;
+    window.deck.notify(name, body, { key: s.key, hubUrl: hub.url });
+  }
+  hub.primed = true;
 }
 
 // ---------- actions ----------
 const decide = (hub, pendingId, decision) => send(hub, { type: 'decide', pendingId, decision });
 const release = (hub, pendingId) => send(hub, { type: 'release', pendingId });
 
-function toggleApprovals() {
-  state.approvals = !state.approvals;
-  window.deck.setApprovals(state.approvals);
+function setApprovals(enabled, tellMain) {
+  state.approvals = Boolean(enabled);
+  state.settingsDirty = true;
+  if (tellMain) window.deck.setApprovals(state.approvals);
   for (const hub of state.hubs) send(hub, { type: 'approvals', enabled: state.approvals });
   render();
 }
+const toggleApprovals = () => setApprovals(!state.approvals, true);
 
 // ---------- rendering ----------
 function allSessions() {
@@ -130,14 +286,28 @@ function avatar(s) {
     h('span', { class: 'eye l' }), h('span', { class: 'eye r' }), h('span', { class: 'mouth' }));
 }
 
+const tokens = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`);
+
+// How full the session's context window is (amber from the warning threshold, red near full).
+function contextMeter(c) {
+  if (!c) return null;
+  return h('span', {
+    class: 'ctx' + (c.percent >= 95 ? ' full' : c.warn ? ' warn' : ''),
+    title: `${tokens(c.used)} of ${tokens(c.window)} tokens in context${c.model ? ` (${c.model})` : ''}`,
+  },
+    h('span', { class: 'ctx-bar' }, h('span', { class: 'ctx-fill', style: { width: c.percent + '%' } })),
+    h('span', { text: `ctx ${c.percent}%` }));
+}
+
 function progressRow(s) {
   const p = s.progress;
   const label = h('span', { class: `status st-${s.status}`, text: STATUS_LABEL[s.status] || s.status });
-  if (!p || !p.total) return h('div', { class: 'meta' }, label, s.background.length ? h('span', { class: 'bg-count', text: `${s.background.length} in background` }) : null);
+  const ctx = s.status === 'ended' ? null : contextMeter(s.context);
+  if (!p || !p.total) return h('div', { class: 'meta' }, label, s.background.length ? h('span', { class: 'bg-count', text: `${s.background.length} in background` }) : null, ctx);
   const pct = Math.round((p.done / p.total) * 100);
   return h('div', { class: 'meta' },
     h('span', { class: 'frac', text: `${p.done}/${p.total}` }), label,
-    h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })));
+    h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })), ctx);
 }
 
 function approvalBox(hub, s, p) {
@@ -152,7 +322,8 @@ function approvalBox(hub, s, p) {
       h('button', { class: 'btn ghost', text: 'Terminal', title: 'Answer in the terminal instead', onclick: () => release(hub, p.id) })),
     h('div', { class: 'countdown', 'data-expires': p.expiresAt, text: countdownText(left) }));
 }
-const countdownText = (left) => `Goes back to the terminal in ${left}s`;
+// Claude Code shows the prompt in the terminal too; after this the panel can no longer answer.
+const countdownText = (left) => `Answer here or in the terminal · ${left >= 60 ? Math.ceil(left / 60) + ' min' : left + 's'} left here`;
 
 function questionBox(hub, s, p) {
   const draft = state.drafts[p.id] || (state.drafts[p.id] = { answers: {}, other: {} });
@@ -186,8 +357,11 @@ function questionBox(hub, s, p) {
       })),
       h('input', {
         class: 'other', placeholder: 'Or type an answer…', value: draft.other[q.question] || '',
+        'data-key': `${p.id}|${q.question}`,
         oninput: (e) => { draft.other[q.question] = e.target.value; },
-        onkeydown: (e) => { if (e.key === 'Enter' && complete()) submit(); },
+        onkeydown: (e) => { if (e.key === 'Enter' && !e.isComposing && complete()) submit(); },
+        oncompositionstart: () => { state.composing = true; },
+        oncompositionend: () => { state.composing = false; render(); },
       }))),
     h('div', { class: 'btns' },
       single ? null : h('button', { class: 'btn allow', text: 'Send', onclick: () => complete() && submit() }),
@@ -214,6 +388,20 @@ function details(s) {
   return h('div', { class: 'details' }, rows);
 }
 
+// Claude Code's permission mode, when it isn't the default (Shift+Tab in the session changes it).
+const MODES = {
+  acceptEdits: ['accept edits', 'Accept edits: file edits run without asking; commands still ask'],
+  plan: ['plan', 'Plan mode: Claude plans and asks before making changes'],
+  auto: ['auto', 'Auto mode: Claude Code decides which actions need your approval'],
+  bypassPermissions: ['bypass', 'Bypass permissions: Claude Code won\'t ask before running tools'],
+  dontAsk: ['don\'t ask', 'Don\'t ask: tools that would need approval are refused instead'],
+};
+function modeBadge(mode) {
+  if (!mode || mode === 'default') return null;
+  const [label, title] = MODES[mode] || [mode, `Permission mode: ${mode}`];
+  return h('span', { class: 'mode' + (mode === 'bypassPermissions' ? ' bypass' : ''), text: label, title });
+}
+
 function card({ hub, s }) {
   const open = state.expanded.has(s.key);
   const multi = state.hubs.length > 1;
@@ -231,6 +419,8 @@ function card({ hub, s }) {
         progressRow(s)),
       h('div', { class: 'side' },
         multi ? h('span', { class: 'host', text: hub.name }) : null,
+        s.watchOnly ? h('span', { class: 'watch', text: 'watch only', title: 'Started before Agent Deck\'s hooks were installed. Restart the session to answer from here.' }) : null,
+        modeBadge(s.permissionMode),
         h('div', { class: 'side-btns' },
           hub.local && s.canJump ? h('button', { class: 'icon small', title: 'Jump to this session', html: ICONS.jump, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'jump', key: s.key }); } }) : null,
           h('button', { class: 'icon small', title: 'Hide this card', html: ICONS.close, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'dismiss', key: s.key }); } })))),
@@ -239,12 +429,109 @@ function card({ hub, s }) {
     open ? details(s) : null);
 }
 
+// ---------- service agents ----------
+const AGENT_LABEL = { idle: 'Idle', working: 'Working', waiting: 'Waiting on you', error: 'Error', not_responding: 'Not responding' };
+const AGENT_DOT = { working: 'st-working', waiting: 'st-approval', error: 'st-error', not_responding: 'st-error', idle: 'st-idle' };
+function allAgents() {
+  const out = [];
+  for (const hub of state.hubs) for (const a of hub.agents || []) out.push({ hub, a });
+  return out.sort((x, y) => x.a.displayName.localeCompare(y.a.displayName));
+}
+const span = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`; };
+function when(ts) {
+  const d = new Date(ts), now = new Date();
+  const hm = d.toTimeString().slice(0, 5);
+  const day = d.toDateString() === now.toDateString() ? '' : d.getTime() - now.getTime() < 6 * 86400000 ? d.toLocaleDateString(undefined, { weekday: 'short' }) + ' ' : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) + ' ';
+  return `${day}${hm} (in ${span(ts - now.getTime())})`;
+}
+function agentLine(a) {
+  if (a.status === 'not_responding') return `No heartbeat for ${ago(a.lastHeartbeat)} (expected every ${span(a.heartbeat * 1000)})`;
+  if (a.status === 'error' && a.lastError) return a.lastError.message;
+  if (a.job) return a.job.job + (a.step ? ` · ${a.step}` : a.job.detail ? ` · ${a.job.detail}` : '') + (a.jobsRunning > 1 ? ` (+${a.jobsRunning - 1})` : '');
+  if (a.nextJob) return `Idle · next: ${a.nextJob.job} ${when(a.nextJob.nextRun)}`;
+  return a.step || a.description || 'Idle';
+}
+function agentDetails(a) {
+  const rows = [];
+  const openLink = (link) => (e) => { e.preventDefault(); e.stopPropagation(); window.deck.openLink(link); };
+  if (a.description) rows.push(h('div', { class: 'last-msg', text: a.description }));
+  if (a.waiting.length) {
+    rows.push(h('div', { class: 'd-head', text: 'Waiting on you (answer in Chat)' }));
+    for (const w of a.waiting) {
+      rows.push(h('div', { class: 'd-row' },
+        w.link ? h('a', { class: 'd-text link', href: '#', title: w.link, text: w.title, onclick: openLink(w.link) }) : h('span', { class: 'd-text', text: w.title }),
+        h('span', { class: 'd-st', text: ago(w.at) })));
+    }
+  }
+  if (a.recent.length) {
+    rows.push(h('div', { class: 'd-head', text: 'Recent jobs' }));
+    for (const j of a.recent.slice(0, 6)) {
+      rows.push(h('div', { class: 'd-row' },
+        h('span', { class: 'd-type' + (j.result === 'ok' ? '' : ' bad'), text: j.result === 'ok' ? '✓' : '✗' }),
+        h('span', { class: 'd-text', title: j.summary, text: j.job + (j.summary ? ` · ${j.summary}` : '') }),
+        h('span', { class: 'd-st', text: ago(j.at) + (j.durationMs != null ? ` · ${span(j.durationMs)}` : '') })));
+    }
+  }
+  if (a.tokensToday && a.tokensToday.total) {
+    const t = a.tokensToday;
+    rows.push(h('div', { class: 'd-head', text: 'Tokens today' }));
+    rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: `${t.total.toLocaleString()} (in ${t.input.toLocaleString()} · out ${t.output.toLocaleString()})` })));
+    for (const [model, n] of t.models.slice(0, 4)) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: model }), h('span', { class: 'd-st', text: n.toLocaleString() })));
+  }
+  if (a.errors && a.errors.length) {
+    rows.push(h('div', { class: 'd-head', text: 'Last errors' }));
+    for (const e of a.errors) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: e.type + (e.job ? ` · ${e.job}` : '') }), h('span', { class: 'd-st', text: ago(e.at) })));
+    if (a.crashLoop && a.lastError) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: a.lastError.message })));
+  } else if (a.lastError) {
+    rows.push(h('div', { class: 'd-head', text: 'Last error' }));
+    rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', title: a.lastError.message, text: a.lastError.message }), h('span', { class: 'd-st', text: ago(a.lastError.at) })));
+  }
+  if (a.schedule.length) {
+    rows.push(h('div', { class: 'd-head', text: 'Schedule' }));
+    for (const s of a.schedule.slice(0, 6)) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: s.job }), h('span', { class: 'd-st', text: when(s.nextRun) })));
+  }
+  const restarts = a.restarts ? ` · restarted ${a.restarts}× (last ${ago(a.startedAt)} ago)` : '';
+  rows.push(h('div', { class: 'd-cwd', text: (a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago`) + restarts }));
+  return h('div', { class: 'details' }, rows);
+}
+function agentCard({ hub, a }) {
+  const open = state.expanded.has(a.key);
+  const attention = a.status === 'waiting' || a.status === 'error' || a.status === 'not_responding';
+  const last = a.lastJob ? h('span', { class: 'ag-last', title: a.lastJob.summary, text: `last: ${a.lastJob.job} ${a.lastJob.result === 'ok' ? '✓' : '✗'} ${ago(a.lastJob.at)}` }) : null;
+  return h('div', {
+    class: `card agent ag-${a.status}${attention ? ' attention' : ''}${open ? ' open' : ''}`,
+    onclick: () => { open ? state.expanded.delete(a.key) : state.expanded.add(a.key); render(); },
+  },
+    h('div', { class: 'row' },
+      h('div', { class: `avatar bot ag-${a.status}`, style: { background: colorFor(a.key) } }, h('span', { class: 'eye l' }), h('span', { class: 'eye r' }), h('span', { class: 'mouth' })),
+      h('div', { class: 'body' },
+        h('div', { class: 'name', title: a.displayName, text: a.displayName }),
+        h('div', { class: 'step', title: agentLine(a), text: agentLine(a) }),
+        h('div', { class: 'meta' },
+          h('span', { class: `status ag-${a.status}`, text: (AGENT_LABEL[a.status] || a.status) + (a.status === 'waiting' ? ` · ${a.waiting.length}` : '') }),
+          a.waiting.length && a.status !== 'waiting' ? h('span', { class: 'ag-wait', text: `${a.waiting.length} waiting` }) : null,
+          last)),
+      h('div', { class: 'side' },
+        state.hubs.length > 1 ? h('span', { class: 'host', text: hub.name }) : null,
+        a.source === 'otlp' ? h('span', { class: 'watch', text: 'OTLP', title: 'Reports through OpenTelemetry' }) : null,
+        h('div', { class: 'side-btns' },
+          h('button', { class: 'icon small', title: 'Hide this agent until it reports again', html: ICONS.close, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'dismiss-agent', key: a.key }); } })))),
+    open ? agentDetails(a) : null);
+}
+
 function render() {
-  // Don't rebuild while someone is typing an answer.
-  const typing = document.activeElement && document.activeElement.classList.contains('other');
+  // Rebuilding the list replaces the answer boxes. Typed text survives in state.drafts;
+  // remember which box had focus (and the caret) so it can be put back afterwards.
+  // Only an in-progress IME composition defers the rebuild (compositionend re-renders).
+  const focused = document.activeElement;
+  const focusKey = focused && focused.classList.contains('other') ? focused.dataset.key : null;
+  const focusField = focused && focused.classList.contains('set-input') ? focused.dataset.field : null;
+  const caret = focusKey || focusField ? [focused.selectionStart, focused.selectionEnd] : null;
   const items = allSessions();
   const active = items.filter((x) => x.s.status !== 'ended');
-  const needs = items.filter((x) => x.s.pending || x.s.status === 'approval' || x.s.status === 'question').length;
+  const agentItems = allAgents();
+  const needs = items.filter((x) => x.s.pending || x.s.status === 'approval' || x.s.status === 'question').length
+    + agentItems.filter(({ a }) => a.status === 'waiting' || a.status === 'error' || a.status === 'not_responding').length;
 
   document.getElementById('count').textContent = active.length ? String(active.length) : '';
   const live = document.getElementById('live-dot');
@@ -254,21 +541,40 @@ function render() {
   approvalsBtn.title = state.approvals ? 'Approvals and questions come here first (click to send them to the terminal only)' : 'Approvals go to the terminal only (click to answer them here)';
   approvalsBtn.classList.toggle('on', state.approvals);
   document.getElementById('btn-collapse').innerHTML = state.collapsed ? ICONS.down : ICONS.up;
+  const gear = document.getElementById('btn-settings');
+  gear.innerHTML = ICONS.gear;
+  gear.classList.toggle('on', state.settingsOpen);
+  gear.title = state.settingsOpen ? 'Back to sessions' : 'Settings';
 
   const dots = document.getElementById('dots');
-  dots.replaceChildren(...(state.collapsed ? items.map(({ s }) => h('span', { class: `mini st-${s.status}`, title: `${s.project}: ${s.step}` })) : []));
+  dots.replaceChildren(...(state.collapsed ? [
+    ...items.map(({ s }) => h('span', { class: `mini st-${s.status}`, title: `${s.project}: ${s.step}` })),
+    ...agentItems.map(({ a }) => h('span', { class: `mini square ${AGENT_DOT[a.status] || ''}`, title: `${a.displayName}: ${agentLine(a)}` })),
+  ] : []));
 
-  if (!typing) {
+  if (!state.composing) {
     const list = document.getElementById('list');
     list.hidden = state.collapsed;
-    if (!items.length) {
-      const anyConnected = state.hubs.some((x) => x.connected);
-      list.replaceChildren(h('div', { class: 'empty' },
-        anyConnected ? 'No Claude Code sessions yet.' : 'Connecting to the Agent Deck daemon…',
-        h('div', { class: 'hint', text: anyConnected ? 'Start one with "claude". Sessions that were already open appear once you restart them.' : 'Run "agent-deck start" if this doesn\'t clear.' })));
+    if (state.settingsOpen) {
+      // Rebuild only when a setting changed: a snapshot re-render would close an open dropdown.
+      if (state.settingsDirty || !list.querySelector('.settings')) {
+        list.replaceChildren(settingsView());
+        const again = focusField && list.querySelector(`.set-input[data-field="${focusField}"]`);
+        if (again) { again.focus(); try { again.setSelectionRange(caret[0], caret[1]); } catch {} }
+      }
+      state.settingsDirty = false;
     } else {
-      list.replaceChildren(...items.map(card));
+      const anyConnected = state.hubs.some((x) => x.connected);
+      const sessionsPart = items.length ? items.map(card) : [h('div', { class: 'empty' },
+        anyConnected ? 'No Claude Code sessions yet.' : 'Connecting to the Agent Deck daemon…',
+        h('div', { class: 'hint', text: anyConnected ? 'Start one with "claude"; running sessions show up within a few seconds.' : 'Run "agent-deck start" if this doesn\'t clear.' }))];
+      // Service agents get their own section below the Claude Code sessions.
+      const agentsPart = agentItems.length ? [h('div', { class: 'section-head', text: 'Agents' }), ...agentItems.map(agentCard)] : [];
+      list.replaceChildren(...sessionsPart, ...agentsPart);
     }
+    // Put focus back only if that question is still open; an answered one is gone.
+    const again = focusKey && [...list.querySelectorAll('input.other')].find((el) => el.dataset.key === focusKey);
+    if (again) { again.focus(); try { again.setSelectionRange(caret[0], caret[1]); } catch {} }
   }
 
   const footer = document.getElementById('hubs');
@@ -290,12 +596,33 @@ setInterval(() => {
 document.getElementById('btn-approvals').addEventListener('click', toggleApprovals);
 document.getElementById('btn-collapse').addEventListener('click', () => { state.collapsed = !state.collapsed; render(); });
 document.getElementById('btn-close').innerHTML = ICONS.close;
+document.getElementById('btn-close').title = 'Quit Agent Deck (to only hide it: Ctrl+Alt+A or the tray icon)';
 document.getElementById('btn-close').addEventListener('click', () => window.deck.quit());
+// Esc collapses the panel (leaving an answer box first if one has focus).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (document.activeElement?.classList.contains('other')) { document.activeElement.blur(); return; }
+  if (state.settingsOpen) state.settingsOpen = false; else state.collapsed = true;
+  render();
+});
+document.getElementById('btn-settings').addEventListener('click', () => {
+  state.settingsOpen = !state.settingsOpen;
+  if (state.settingsOpen) state.collapsed = false;
+  render();
+});
+window.deck.onApprovals((enabled) => setApprovals(enabled, false));
+// A notification was clicked: open the agent item's link, or jump to the session (this machine only).
+window.deck.onJump((target) => {
+  if (target?.link) { window.deck.openLink(target.link); return; }
+  const hub = state.hubs.find((x) => x.url === target?.hubUrl);
+  if (hub && hub.local) send(hub, { type: 'jump', key: target.key });
+});
 
 window.deck.config().then((cfg) => {
   state.approvals = cfg.approvalsInWidget;
+  applyConfig(cfg);
   document.body.classList.add('os-' + cfg.platform);
   setHubs(cfg.hubs);
 });
-window.deck.onConfigChanged((cfg) => setHubs(cfg.hubs));
+window.deck.onConfigChanged((cfg) => { applyConfig(cfg); setHubs(cfg.hubs); });
 render();
