@@ -912,7 +912,7 @@ async function main() {
 
 main().catch((e) => {
   for (const p of sleepers) p.kill();
-  console.error('\nFAILED:', e.message);
+  console.error('\nFAILED:', e.stack || e.message); // the stack names the failing line
   try { process.kill(Number(fs.readFileSync(path.join(HOME, 'daemon.pid'), 'utf8')), 'SIGTERM'); } catch {}
   console.error(fs.existsSync(path.join(HOME, 'daemon.log')) ? fs.readFileSync(path.join(HOME, 'daemon.log'), 'utf8').slice(-3000) : '');
   process.exit(1);
