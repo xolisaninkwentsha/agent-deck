@@ -230,17 +230,22 @@ export function applyOtlpSpans(a, spans, now = Date.now()) {
 // The heartbeat: a metric named like "*heartbeat*". For a counter or sum, only an increase counts
 // as alive (the SDK exports from its own thread, so a hung main loop still exports the same
 // value). A new start time or service.instance.id means the process restarted.
+// Delta temporality: each point is the increase since the last export, with a new start time
+// every time, so alive = more than 0, and only a new service.instance.id is a restart.
 export function applyOtlpMetrics(a, metrics, resource, now = Date.now(), heartbeatSeconds = 60) {
   const o = a.otlp;
   a.lastSeen = now;
   for (const m of metrics) {
     if (!/heartbeat/i.test(m.name) || !m.points.length) continue;
     const p = m.points[m.points.length - 1];
+    const delta = m.temporality === 1;
+    const level = m.kind === 'histogram' ? p.count : p.value;
     const hb = o.hb, instance = text(resource?.['service.instance.id'], 80);
-    const restarted = Boolean((hb.start && p.start && p.start !== hb.start) || (hb.instance && instance && instance !== hb.instance));
+    const newStart = !delta && hb.start && p.start && p.start !== hb.start;
+    const restarted = Boolean(newStart || (hb.instance && instance && instance !== hb.instance));
     if (restarted) { o.restartTimes.push(now); o.restartTimes = o.restartTimes.slice(-20); a.restarts = (a.restarts || 0) + 1; a.startedAt = now; }
-    const advanced = restarted || hb.value === undefined || m.kind === 'gauge' || p.value !== hb.value;
-    Object.assign(hb, { value: p.value, start: p.start, instance });
+    const advanced = restarted || m.kind === 'gauge' || (delta ? level > 0 : hb.value === undefined || level !== hb.value);
+    Object.assign(hb, { value: level, start: delta ? 0 : p.start, instance });
     a.heartbeat = heartbeatSeconds;
     if (advanced) a.lastHeartbeat = now;
   }
@@ -277,6 +282,14 @@ export function otlpTick(a, now, { waitingTtlMs = 7 * 24 * 3600 * 1000 } = {}) {
   if (loop && !o.crashLoop) a.lastError = { message: `Restarting repeatedly (${recentRestarts} restarts in 10 min)`, at: now };
   if (loop !== o.crashLoop) { o.crashLoop = loop; changed = true; }
   return changed;
+}
+
+// After the machine slept: nothing could arrive while it was suspended, so move the liveness
+// clocks on by the time asleep. An agent that was already silent before the sleep stays silent.
+export function shiftClocks(a, ms) {
+  if (!(ms > 0)) return;
+  if (a.lastHeartbeat) a.lastHeartbeat += ms;
+  if (a.otlp) for (const r of Object.values(a.otlp.running)) r.lastAt += ms;
 }
 
 function otlpView(a, now) {

@@ -125,7 +125,8 @@ function histogramPoint(buf) {
   return p;
 }
 function metric(buf) {
-  const m = { name: '', unit: '', kind: '', monotonic: false, points: [] };
+  // temporality: 0 unspecified, 1 delta (each point is the change since the last export), 2 cumulative
+  const m = { name: '', unit: '', kind: '', monotonic: false, temporality: 0, points: [] };
   for (const f of fields(buf)) {
     if (f.field === 1) m.name = str(f.value);
     else if (f.field === 3) m.unit = str(f.value);
@@ -133,6 +134,7 @@ function metric(buf) {
       m.kind = f.field === 5 ? 'gauge' : f.field === 7 ? 'sum' : 'histogram';
       for (const g of fields(f.value)) {
         if (g.field === 1) m.points.push(f.field === 9 ? histogramPoint(g.value) : numberPoint(g.value));
+        else if (g.field === 2 && f.field !== 5) m.temporality = Number(g.value);
         else if (g.field === 3 && f.field === 7) m.monotonic = g.value !== 0n;
       }
     }
@@ -218,12 +220,20 @@ const jsonSpan = (s) => ({
 });
 const jsonPoint = (p) => {
   const v = pick(p, 'asDouble', 'as_double') ?? pick(p, 'asInt', 'as_int') ?? pick(p, 'sum');
-  return { attrs: jsonAttrs(pick(p, 'attributes')), start: jsonMs(pick(p, 'startTimeUnixNano', 'start_time_unix_nano')), time: jsonMs(pick(p, 'timeUnixNano', 'time_unix_nano')), value: v == null ? null : Number(v) };
+  return {
+    attrs: jsonAttrs(pick(p, 'attributes')), start: jsonMs(pick(p, 'startTimeUnixNano', 'start_time_unix_nano')), time: jsonMs(pick(p, 'timeUnixNano', 'time_unix_nano')),
+    value: v == null ? null : Number(v), count: Number(pick(p, 'count')) || 0,
+  };
 };
+const TEMPORALITY_NAMES = { AGGREGATION_TEMPORALITY_UNSPECIFIED: 0, AGGREGATION_TEMPORALITY_DELTA: 1, AGGREGATION_TEMPORALITY_CUMULATIVE: 2 };
 const jsonMetric = (m) => {
   const kind = pick(m, 'gauge') ? 'gauge' : pick(m, 'sum') ? 'sum' : pick(m, 'histogram') ? 'histogram' : '';
   const body = kind ? m[kind] : {};
-  return { name: String(pick(m, 'name') || ''), unit: String(pick(m, 'unit') || ''), kind, monotonic: Boolean(pick(body, 'isMonotonic', 'is_monotonic')), points: (pick(body, 'dataPoints', 'data_points') || []).map(jsonPoint) };
+  return {
+    name: String(pick(m, 'name') || ''), unit: String(pick(m, 'unit') || ''), kind, monotonic: Boolean(pick(body, 'isMonotonic', 'is_monotonic')),
+    temporality: kind === 'gauge' ? 0 : enumNum(pick(body, 'aggregationTemporality', 'aggregation_temporality'), TEMPORALITY_NAMES),
+    points: (pick(body, 'dataPoints', 'data_points') || []).map(jsonPoint),
+  };
 };
 const jsonLog = (r) => ({
   time: jsonMs(pick(r, 'timeUnixNano', 'time_unix_nano')) || jsonMs(pick(r, 'observedTimeUnixNano', 'observed_time_unix_nano')),

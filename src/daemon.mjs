@@ -18,7 +18,7 @@ import {
 import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
 import {
   newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs,
-  otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick,
+  otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick, shiftClocks,
 } from './agents.mjs';
 import { decodeOtlp } from './otlp.mjs';
 import zlib from 'node:zlib';
@@ -500,7 +500,8 @@ function handleOtlp(req, res) {
       if (/gzip/i.test(String(req.headers['content-encoding'] || ''))) body = zlib.gunzipSync(body, { maxOutputLength: OTLP_MAX_INFLATED });
       ingestOtlp(signal, decodeOtlp(signal, body, json));
     } catch (e) {
-      log(`OTLP: bad ${signal} request: ${String(e.message).slice(0, 120)}`);
+      // The error class only: a JSON parse error's message quotes the start of the body.
+      log(`OTLP: bad ${signal} request (${e?.name || 'Error'}${e?.code ? ' ' + e.code : ''})`);
       return reply(400, json ? '{"error":"bad request"}' : '', json ? 'application/json' : 'text/plain');
     }
     // An empty Export*ServiceResponse.
@@ -575,9 +576,18 @@ function jumpTo(s) {
 }
 
 // ---------- housekeeping ----------
+const TICK_MS = 2000;
+const WAKE_GAP_MS = Number(process.env.AGENT_DECK_WAKE_GAP_MS) || 30000; // a tick this late means the machine slept
+let lastTick = Date.now();
 setInterval(() => {
   const now = Date.now();
   let changed = false;
+  const gap = now - lastTick;
+  lastTick = now;
+  if (gap > WAKE_GAP_MS) {
+    for (const a of agents.values()) shiftClocks(a, gap - TICK_MS);
+    log(`woke after ${Math.round(gap / 1000)} s: agent heartbeat clocks moved on`);
+  }
   const tails = new Map();
   for (const s of sessions.values()) {
     if (s.ended) continue;
@@ -611,7 +621,7 @@ setInterval(() => {
     if (st !== a.lastStatus) { if (a.lastStatus) log(`agent "${a.name}" is now ${st}`); a.lastStatus = st; changed = true; }
   }
   if (changed) broadcast();
-}, 2000).unref();
+}, TICK_MS).unref();
 
 // ---------- server ----------
 // A web page in a browser on this machine can reach 127.0.0.1 too. Our own clients (hook.mjs,
@@ -702,7 +712,7 @@ function handleUpgrade(req, socket, head) {
     widgets.add(ws);
     log(`widget connected from ${remote} (${widgets.size} total)`);
     ws.on('message', (data) => {
-      try { handleWidgetMessage(ws, JSON.parse(String(data))); } catch (e) { log('widget msg error: ' + e.message); }
+      try { handleWidgetMessage(ws, JSON.parse(String(data))); } catch (e) { log('widget msg error: ' + (e instanceof SyntaxError ? 'SyntaxError' : e.message)); } // a parse error quotes the message
     });
     ws.on('close', () => {
       widgets.delete(ws);

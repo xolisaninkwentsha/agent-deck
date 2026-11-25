@@ -13,5 +13,28 @@
   "content_type": "application/x-protobuf",
   "bytes": 526,
   "requests": 1
+ },
+ "metrics-delta": {
+  "content_type": "application/x-protobuf",
+  "bytes": 313,
+  "requests": 1
+ },
+ "traces.json": {
+  "content_type": "application/json",
+  "content_encoding": "",
+  "bytes": 3264,
+  "requests": 1
+ },
+ "metrics.json": {
+  "content_type": "application/json",
+  "content_encoding": "",
+  "bytes": 515,
+  "requests": 1
+ },
+ "logs.json": {
+  "content_type": "application/json",
+  "content_encoding": "",
+  "bytes": 1072,
+  "requests": 1
  }
 }

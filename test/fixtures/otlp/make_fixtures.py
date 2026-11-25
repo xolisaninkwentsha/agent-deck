@@ -7,8 +7,15 @@ npm test decodes those files, so the decoder is checked against the real exporte
 Not run by npm test. To regenerate (needs opentelemetry-sdk + opentelemetry-exporter-otlp-proto-http):
     pip install --target /tmp/otel-py opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
     PYTHONPATH=/tmp/otel-py python3 test/fixtures/otlp/make_fixtures.py
+    PYTHONPATH=/tmp/otel-py python3 test/fixtures/otlp/make_fixtures.py delta   # only metrics-delta.bin
 """
-import json, logging, os, threading
+import json, logging, os, sys, threading
+
+# "delta": metrics exported with delta temporality, as OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
+# does (each point is the increase since the last export). Writes metrics-delta.bin only.
+DELTA = sys.argv[1:] == ["delta"]
+if DELTA:
+    os.environ["OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"] = "delta"
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from opentelemetry.sdk.resources import Resource
@@ -94,14 +101,22 @@ tracer_provider.force_flush()
 reader.force_flush()
 logger_provider.force_flush()
 
+index = os.path.join(HERE, "fixtures.json")
 expected = {}
+if DELTA:
+    with open(index) as f:
+        expected = json.load(f)
 for path, reqs in captured.items():
     signal = path.rsplit("/", 1)[-1]
+    if DELTA:
+        if signal != "metrics":
+            continue
+        signal = "metrics-delta"
     content_type, body = reqs[0]
     with open(os.path.join(HERE, f"{signal}.bin"), "wb") as f:
         f.write(body)
     expected[signal] = {"content_type": content_type, "bytes": len(body), "requests": len(reqs)}
-with open(os.path.join(HERE, "fixtures.json"), "w") as f:
+with open(index, "w") as f:
     json.dump(expected, f, indent=1)
 print(json.dumps(expected))
 tracer_provider.shutdown(); meter_provider.shutdown(); logger_provider.shutdown()

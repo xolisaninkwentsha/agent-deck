@@ -101,8 +101,9 @@ deck.resolved("bill-42")
 deck.error("Xero sign-in expired")
 ```
 
-- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification). `start(..., timer=False)` plus `deck.heartbeat()` from the agent's own main loop catches a hung loop; the default timer thread only proves the process is alive.
-- **Two kinds of process:** typically a long-running process (heartbeat, chat) and short scheduled jobs. Restarting the long-running one keeps jobs that cron started and the last error. A job that never reports its end is marked failed after `agentJobMaxHours` (12).
+- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification). `start(..., timer=False)` plus `deck.heartbeat()` from the agent's own main loop catches a hung loop; the default timer thread only proves the process is alive. Beat in **every** wait of the loop, back-off sleeps after errors included, or a loop that backs off for minutes reads as hung.
+- **Two kinds of process:** typically a long-running process (heartbeat, chat) and short scheduled jobs. Call `start()` only in the long-running command (e.g. `chat-watch`), never in setup that cron jobs share, or each cron run counts as a restart. Restarting the long-running one keeps jobs that cron started and the last error. A job that never reports its end is marked failed after `agentJobMaxHours` (12).
+- **Sleep:** while this machine is suspended nothing can arrive, so after waking the heartbeat clocks move on by the time asleep instead of flagging every agent.
 - **What's waiting:** `deck.waiting_set([...])` sends the complete list of open items and replaces the panel's, so a lost `resolved` can't leave a stale item.
 - **Privacy:** keep titles and messages short, with no names, amounts or email text. They're stored in `~/.agent-deck/state.json`, shown in notifications and on any panel the machine is shared with. A failed job reports only the exception's type, never its message.
 - **Tests:** `AGENT_DECK_DISABLE=1` turns the client off, so an agent's own test suite doesn't post to your panel.
@@ -133,10 +134,10 @@ tracer_provider = TracerProvider(resource=resource)
 tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))      # http://localhost:4318
 tracer = tracer_provider.get_tracer("finance-agent")
 
-# In the long-running process only (not in cron jobs): the main loop's own pulse.
+# In the long-running command only (e.g. chat-watch), not in setup that cron jobs share: the main loop's own pulse.
 meter_provider = MeterProvider(resource=resource, metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter())])
 heartbeat = meter_provider.get_meter("finance-agent").create_counter("agent.heartbeat")
-# ...each time round the main loop: heartbeat.add(1)
+# ...each time round the main loop, and in every wait (back-off sleeps after errors too): heartbeat.add(1)
 
 # A job: mark it, and put job.name on its child spans too so it shows while it runs.
 with tracer.start_as_current_span("invoke_agent daily", attributes={"job.name": "daily", "gen_ai.operation.name": "invoke_agent"}):
@@ -158,8 +159,8 @@ What the card reads:
 | **Jobs** | spans marked with `job.name` (or `gen_ai.operation.name = invoke_agent`). The job ends when its root span arrives: ok, or failed with `error.type` / the exception's type. Its child spans show it as running, with the **last tool** that finished (`gen_ai.tool.name`). Standalone model calls aren't jobs. |
 | **Waiting on you** | span events (or log events) named `waiting`, `approval.requested` or `human_input.requested`, with `waiting.id`/`approval.id`, `waiting.title`/`approval.title` and a link in `url.full`/`link`. Events named `resolved`, `approval.granted`, `approval.denied` or `human_input.received` with the same id remove them. Otherwise they disappear after 7 days. |
 | **Tokens today** | `gen_ai.usage.input_tokens`/`output_tokens` (older `prompt_tokens`/`completion_tokens` work too), per model. `invoke_agent` totals aren't counted twice. |
-| **Not responding** | a metric named `*heartbeat*` that hasn't **gone up** for 3 minutes (`otlpHeartbeatSeconds` × 3), with a notification. Because the SDK exports from its own thread, a hung main loop keeps exporting the same value; that counts as not responding. |
-| **Error** | failed jobs and ERROR log records (by type only). **3+ restarts in 10 minutes** (seen as a new heartbeat start time or `service.instance.id`) shows "restarting repeatedly", which catches a crash loop that systemd keeps restarting. |
+| **Not responding** | a metric named `*heartbeat*` that hasn't **gone up** for 3 minutes (`otlpHeartbeatSeconds` × 3), with a notification. Because the SDK exports from its own thread, a hung main loop keeps exporting the same value; that counts as not responding. Use a counter: a gauge counts as alive whenever it's exported. Delta export (`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta`) works too: there, any increase since the last export is alive. |
+| **Error** | failed jobs and ERROR log records (by type only). **3+ restarts in 10 minutes** (seen as a new heartbeat start time or `service.instance.id`) shows "restarting repeatedly", which catches a crash loop that systemd keeps restarting. With delta export the start time changes on every export, so only `service.instance.id` counts: the Python SDK sets one per process; with other SDKs, set one at start-up (a fresh UUID). |
 
 - **Waiting events:** spans are exported only when they end, so put a waiting event on a short span (as above), not on the job's own span, or it only appears when the whole job finishes.
 - **GenAI names:** the GenAI conventions are still in development. Newer names are tried first and older ones are accepted; a missing attribute just means less detail.

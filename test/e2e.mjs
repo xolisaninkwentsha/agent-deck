@@ -11,7 +11,10 @@ import zlib from 'node:zlib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-'));
-const PORT = 47000 + Math.floor(Math.random() * 900);
+// A spare port, plus PORT+1/+3/+4/+500 below; none may hit your own daemon or the live-test harness.
+const TAKEN = [47615, 47690, Number(process.env.AGENT_DECK_LIVE_PORT) || 0];
+let PORT;
+do PORT = 47000 + Math.floor(Math.random() * 900); while ([0, 1, 3, 4, 500].some((d) => TAKEN.includes(PORT + d)));
 const OTLP_PORT = PORT + 3; // the test daemon's OpenTelemetry receiver (never the real 4318)
 fs.writeFileSync(path.join(HOME, 'config.json'), JSON.stringify({ port: PORT, holdSeconds: 5, name: 'testbox', otlpPort: OTLP_PORT, otlpHeartbeatSeconds: 1 }));
 // A fake ~/.claude, so the daemon doesn't pick up the real sessions on this machine.
@@ -19,7 +22,7 @@ const CLAUDE = path.join(HOME, 'claude');
 fs.mkdirSync(path.join(CLAUDE, 'sessions'), { recursive: true });
 const CRONTAB = path.join(HOME, 'crontab'); // instead of the real `crontab -l`
 fs.writeFileSync(CRONTAB, '');
-const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, AGENT_DECK_CRONTAB: CRONTAB, AGENT_DECK_JOB_MAX_MS: '6000' };
+const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, AGENT_DECK_CRONTAB: CRONTAB, AGENT_DECK_JOB_MAX_MS: '6000', AGENT_DECK_WAKE_GAP_MS: '3000' };
 delete env.AGENT_DECK_DISABLE;
 const sleepers = []; // stand-ins for running Claude Code processes
 const fakeProcess = () => { const p = spawn('sleep', ['120']); sleepers.push(p); return p; };
@@ -389,6 +392,24 @@ async function main() {
   await until(() => ag('fin-agent')?.status !== 'not_responding', 'back after a heartbeat');
   ok('agent: no heartbeat for 3x its interval shows "not responding"; a heartbeat brings it back');
 
+  // 9m1. Waking from suspend: nothing could arrive while the machine slept, so no false alarms.
+  // SIGSTOP stands in for suspend (timers stop, the clock runs on); the test daemon treats a 3 s gap as a wake.
+  const daemonPid = Number(fs.readFileSync(path.join(HOME, 'daemon.pid'), 'utf8'));
+  await agentPost({ agent: 'gone-agent', event: 'start', heartbeat: 1 });
+  await agentPost({ agent: 'sleepy-agent', event: 'start', heartbeat: 1 });
+  const sleepyBeat = setInterval(() => agentPost({ agent: 'sleepy-agent', event: 'heartbeat' }).catch(() => {}), 300);
+  await until(() => ag('gone-agent')?.status === 'not_responding' && ag('sleepy-agent')?.status === 'idle', 'one silent agent, one beating', 80);
+  clearInterval(sleepyBeat);
+  await agentPost({ agent: 'sleepy-agent', event: 'heartbeat' });
+  process.kill(daemonPid, 'SIGSTOP');
+  await sleep(4500);
+  process.kill(daemonPid, 'SIGCONT');
+  await sleep(800);
+  assert.equal(ag('sleepy-agent').status, 'idle', 'no "not responding" straight after waking');
+  assert.equal(ag('gone-agent').status, 'not_responding', 'an agent already silent before the sleep stays that way');
+  assert.match(fs.readFileSync(path.join(HOME, 'daemon.log'), 'utf8'), /woke after \d+ s/);
+  ok('waking from suspend: heartbeat clocks move on by the sleep, so no false "not responding"');
+
   // 9m2. The cron matcher on fixed (local) times.
   const { nextRun } = await import('../src/agents.mjs');
   const wed0800 = new Date(2026, 10, 25, 8, 0).getTime(); // Wed 25 Nov 2026 08:00
@@ -528,17 +549,34 @@ async function main() {
     assert.equal(res.headers.get('content-type'), 'application/x-protobuf');
     assert.equal((await res.arrayBuffer()).byteLength, 0, 'an empty Export*ServiceResponse');
   }
+  // Real OTLP/JSON from the official JS exporter (make_json_fixtures.mjs): the same telemetry, plus a waiting log event.
+  for (const sig of ['traces', 'metrics', 'logs']) {
+    const res = await otlpPost(`/v1/${sig}`, fs.readFileSync(path.join(FIX, `${sig}.json`)));
+    assert.equal(res.status, 200, `${sig}.json fixture`);
+    assert.equal(await res.text(), '{}');
+  }
   await until(() => ot('fixture-agent')?.recent.length === 2 && ot('fixture-agent').errors.length === 2, 'fixture agent', 60);
-  let fx = ot('fixture-agent');
-  assert.equal(fx.source, 'otlp');
-  assert.equal(fx.description, 'v1.2.3');
-  assert.deepEqual(fx.recent.map((j) => [j.job, j.result, j.summary]), [['weekly', 'error', 'PermissionError'], ['daily', 'ok', '']]);
-  assert.deepEqual(fx.waiting.map((w) => [w.id, w.title, w.link]), [['bill-42', 'Approve supplier bill', 'https://chat.google.com/room/FIXTURE/thread-1']]);
-  assert.deepEqual([fx.tokensToday.input, fx.tokensToday.output, fx.tokensToday.models[0][0]], [1200, 340, 'claude-sonnet-5-5']);
-  assert.deepEqual(fx.errors.map((e) => e.type), ['TimeoutError', 'PermissionError']);
+  await until(() => ot('fixture-agent-js')?.recent.length === 2 && ot('fixture-agent-js').errors.length === 2, 'JSON fixture agent', 60);
+  for (const service of ['fixture-agent', 'fixture-agent-js']) {
+    const fx = ot(service);
+    assert.equal(fx.source, 'otlp');
+    assert.equal(fx.description, 'v1.2.3');
+    assert.deepEqual(fx.recent.map((j) => [j.job, j.result, j.summary]), [['weekly', 'error', 'PermissionError'], ['daily', 'ok', '']], service);
+    assert.deepEqual([fx.tokensToday.input, fx.tokensToday.output, fx.tokensToday.models[0][0]], [1200, 340, 'claude-sonnet-5-5'], service);
+    assert.deepEqual(fx.errors.map((e) => e.type), ['TimeoutError', 'PermissionError'], service);
+    assert.equal(fx.heartbeat, 1, `${service}: heartbeat seen`);
+  }
+  assert.deepEqual(ot('fixture-agent').waiting.map((w) => [w.id, w.title, w.link]), [['bill-42', 'Approve supplier bill', 'https://chat.google.com/room/FIXTURE/thread-1']]);
+  assert.deepEqual(ot('fixture-agent-js').waiting.map((w) => [w.id, w.title, w.link]).sort(), [
+    ['bill-42', 'Approve supplier bill', 'https://chat.google.com/room/FIXTURE/thread-1'], ['draft-7', 'Send draft to investor', 'https://chat.google.com/room/FIXTURE/thread-2']]);
+  // Delta temporality as the Python exporter sends it with OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta.
+  const { decodeOtlp } = await import('../src/otlp.mjs');
+  const temporality = (file) => decodeOtlp('metrics', fs.readFileSync(path.join(FIX, file)), false)[0].items.find((m) => m.name === 'agent.heartbeat').temporality;
+  assert.deepEqual([temporality('metrics.bin'), temporality('metrics-delta.bin')], [2, 1], 'cumulative = 2, delta = 1');
   await sleep(700); // state.json is written half a second after a change
   assert.ok(!/SECRET/.test(fs.readFileSync(path.join(HOME, 'state.json'), 'utf8')), 'no message, body or stacktrace text may be stored');
-  ok('OTLP protobuf from the real Python exporter: jobs, outcome, waiting link, tokens, error types; no message text stored');
+  ok('OTLP protobuf from the real Python exporter: jobs, outcome, waiting link, tokens, error types, delta temporality; no message text stored');
+  ok('OTLP JSON from the real JS exporter: the same card, plus a waiting item from a log event; no message text stored');
 
   // A job seen while it runs (children carry job.name), then its root ends it. JSON, partly gzip.
   const T1 = 'a1'.repeat(16), ROOT1 = 'b1'.repeat(8);
@@ -579,13 +617,34 @@ async function main() {
   await until(() => ot('hb-agent')?.status === 'error' && /Restarting repeatedly/.test(ot('hb-agent').lastError?.message), 'crash loop', 60);
   ok('OTLP liveness: a heartbeat that stops advancing shows not responding; 3 restarts in 10 min show an error');
 
+  // Delta temporality: each export carries only the increase since the last one, with a new start time.
+  let deltaFrom = Date.now() - 1000;
+  const deltaBody = (value, instance = 'inst-d', temporality = 1) => {
+    const start = deltaFrom; deltaFrom = Date.now();
+    return { resourceMetrics: [{ resource: resource('hb-delta', { 'service.instance.id': instance }), scopeMetrics: [{ metrics: [
+      { name: 'agent.heartbeat', sum: { isMonotonic: true, aggregationTemporality: temporality, dataPoints: [{ asInt: String(value), startTimeUnixNano: nanos(start), timeUnixNano: nanos(deltaFrom) }] } },
+    ] }] }] };
+  };
+  await otlpPost('/v1/metrics', deltaBody(1, 'inst-d', 'AGGREGATION_TEMPORALITY_DELTA')); // the enum by name
+  const steady = setInterval(() => otlpPost('/v1/metrics', deltaBody(1)).catch(() => {}), 500); // equal deltas
+  await sleep(4500);
+  clearInterval(steady);
+  assert.equal(ot('hb-delta').status, 'idle', 'equal deltas every half second: alive');
+  assert.equal(ot('hb-delta').restarts, 0, 'a new start time on each delta is not a restart');
+  await until(() => ot('hb-delta')?.status === 'not_responding', 'no more deltas = not responding', 80);
+  for (let i = 1; i <= 3; i++) await otlpPost('/v1/metrics', deltaBody(1, `inst-d${i}`));
+  await until(() => ot('hb-delta')?.status === 'error' && /Restarting repeatedly/.test(ot('hb-delta').lastError?.message), 'delta crash loop', 60);
+  ok('OTLP delta heartbeats: equal deltas are alive, new start times are not restarts, new instance ids are');
+
   // Refusals, bad bodies, ignored services.
   assert.equal((await otlpPost('/v1/traces', tracesBody('web', []), { headers: { origin: 'https://evil.example' } })).status, 403);
   assert.equal((await otlpPost('/v1/traces', 'x', { type: 'text/plain' })).status, 415);
   assert.equal((await otlpPost('/v1/other', {})).status, 404);
   assert.equal((await fetch(`http://127.0.0.1:${OTLP_PORT}/v1/traces`)).status, 405);
   assert.equal((await otlpPost('/v1/traces', Buffer.from([0x0a, 0xff, 0xff]), { type: 'application/x-protobuf' })).status, 400);
-  assert.equal((await otlpPost('/v1/traces', '{not json')).status, 400);
+  assert.equal((await otlpPost('/v1/traces', 'SECRET-IN-A-BAD-BODY {')).status, 400);
+  await sleep(100);
+  assert.ok(!/SECRET/.test(fs.readFileSync(path.join(HOME, 'daemon.log'), 'utf8')), 'a bad body never reaches the log (a JSON error quotes its start)');
   await otlpPost('/v1/traces', tracesBody('claude-code', [jspan({ trace: 'f1'.repeat(16), id: 'f2'.repeat(8), name: 'invoke_agent x', attrs: { 'job.name': 'x' } })]));
   await sleep(300);
   assert.equal(ot('claude-code'), undefined);
