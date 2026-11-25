@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('deck', {
   resize: (height) => ipcRenderer.send('resize', height),
   setApprovals: (enabled) => ipcRenderer.send('set-approvals', enabled),
   saveSettings: (patch) => ipcRenderer.send('save-settings', patch),
+  openLink: (url) => ipcRenderer.send('open-link', url), // main only opens http(s) links
   notify: (title, body, target) => ipcRenderer.send('notify', { title, body, target }),
   onJump: (fn) => ipcRenderer.on('jump', (_e, target) => fn(target)), // a notification was clicked
   quit: () => ipcRenderer.send('quit'),

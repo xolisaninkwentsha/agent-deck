@@ -75,6 +75,36 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
 
 "Always" applies the rule Claude Code suggests (for example "always allow `npm run test`"), the same as choosing "Yes, don't ask again" in the terminal.
 
+## Service agents
+
+Long-running agents that aren't Claude Code sessions (scheduled jobs, chat bots) get their own **Agents** section below the sessions. Each card shows:
+
+- whether it's idle, working, **waiting on you**, in **error**, or **not responding**;
+- the job and step it's on, or the next scheduled job;
+- how many items are waiting on you;
+- how its last job went.
+
+Click a card to see the waiting items as links (they open in the browser: the Chat thread or email where you answer), the recent jobs, the last error and the schedule. **The panel doesn't approve anything for these agents**; approvals stay where the agent asks for them.
+
+An agent reports with the tiny Python client in `clients/python/agent_deck.py`. It uses only the standard library: copy it into the agent's repo. It never raises and never blocks; if Agent Deck isn't running, events are dropped.
+
+```python
+from agent_deck import Deck
+deck = Deck("finance-agent")
+deck.start("Billing and collections", heartbeat=60)   # in the long-running process only
+with deck.job("daily") as job:                        # job_start / job_end (error if it raises)
+    deck.step("Matching payments")
+    deck.waiting("bill-42", "Approve supplier bill 42", "https://chat.google.com/...")
+    job.summary = "3 reminders sent"
+deck.resolved("bill-42")
+deck.error("Xero sign-in expired")
+```
+
+- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification).
+- **Schedule:** the daemon reads your crontab and lists the lines that run in the agent's working folder (`python -m <package> <job>`), with their next run. An agent can also send its own (`deck.schedule([(job, next_run), ...])`).
+- **Under the hood:** `POST http://127.0.0.1:47615/agent` with JSON `{agent, event, ...}`; only requests from this machine are accepted. Events: `start` (name, description, heartbeat, cwd), `heartbeat`, `job_start` (job, detail), `step` (text), `job_end` (job, result ok|error, summary), `waiting` (id, title, link), `resolved` (id), `schedule` (list of {job, next_run}), `error` (message).
+- **To see it** without real agents: `node test/demo.mjs` adds two demo agents (one waiting on you, one that stops responding).
+
 ## Sessions that started before Agent Deck
 
 Claude Code keeps a small file per running session in `~/.claude/sessions/`, with its folder, its title and whether it's busy, idle or waiting for you. The daemon reads these every 2 seconds:

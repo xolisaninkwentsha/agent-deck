@@ -1,8 +1,10 @@
-// Feeds the local daemon a few fake sessions so you can see the panel without real agents.
+// Feeds the local daemon a few fake sessions and two fake service agents, so you can see the
+// panel without real agents.
 // Usage: node test/demo.mjs        (Ctrl+C to stop; the fake sessions end on exit)
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig } from '../src/config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hook = (mode, input) => new Promise((resolve) => {
@@ -13,6 +15,40 @@ const hook = (mode, input) => new Promise((resolve) => {
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ev = (id, cwd, event, extra = {}) => hook('observe', { session_id: id, cwd, hook_event_name: event, ...extra });
+
+// Service agents report over POST /agent (what clients/python/agent_deck.py does).
+const PORT = loadConfig().port;
+const agent = (body) => fetch(`http://127.0.0.1:${PORT}/agent`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {});
+const at = (days, h, m) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(h, m, 0, 0); return d.getTime(); };
+async function demoAgents() {
+  const fin = (ev) => agent({ agent: 'finance-agent-demo', ...ev });
+  await fin({ event: 'start', name: 'finance-agent (demo)', description: 'Billing, collections and supplier bills; approvals in Google Chat', heartbeat: 5 });
+  await fin({ event: 'schedule', schedule: [{ job: 'daily', next_run: at(1, 7, 47) }, { job: 'weekly', next_run: at(5, 7, 52) }] });
+  await fin({ event: 'job_start', job: 'hourly' });
+  await fin({ event: 'job_end', job: 'hourly', result: 'ok', summary: '2 payments matched, nothing to chase' });
+  await fin({ event: 'job_start', job: 'daily', detail: 'morning run' });
+  await fin({ event: 'step', text: 'Matching 14 payments to invoices' });
+  await fin({ event: 'waiting', id: 'bill-1042', title: 'Approve supplier bill 1042 (R 18 400)', link: 'https://chat.google.com/room/DEMO/thread-1' });
+  await fin({ event: 'waiting', id: 'remind-acme', title: 'Send the second reminder to Acme?', link: 'https://chat.google.com/room/DEMO/thread-2' });
+  setInterval(() => fin({ event: 'heartbeat' }), 4000).unref();
+
+  const fund = (ev) => agent({ agent: 'funding-agent-demo', ...ev });
+  await fund({ event: 'start', name: 'funding agent (demo)', description: 'Fundraising round; drafts sent when an approver says so', heartbeat: 2 });
+  await fund({ event: 'job_start', job: 'sync' });
+  await fund({ event: 'job_end', job: 'sync', result: 'ok', summary: '3 new investor replies filed' });
+  // ...and then no more heartbeats, so after 6 s it shows "Not responding".
+}
+async function removeDemoAgents() {
+  await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      for (const a of m.agents || []) if (a.name.endsWith('-demo')) ws.send(JSON.stringify({ type: 'dismiss-agent', key: a.key }));
+      setTimeout(() => { ws.close(); resolve(); }, 200);
+    };
+    ws.onerror = () => resolve();
+  });
+}
 
 const A = ['demo-a', '/home/you/code/voice-api'];
 const B = ['demo-b', '/home/you/code/mymzansi-demo'];
@@ -45,12 +81,15 @@ async function main() {
   await sleep(150);
   const question = hook('decide', { session_id: C[0], cwd: C[1], hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Which pricing model should the sheet assume?', header: 'Pricing', multiSelect: false, options: [{ label: 'Per minute', description: '' }, { label: 'Per call', description: '' }, { label: 'Tiered', description: '' }] }] } });
 
+  await demoAgents();
+
   approval.then((out) => console.log('approval answer:', out || '(handed to terminal)'));
   question.then((out) => console.log('question answer:', out || '(handed to terminal)'));
   console.log('Demo sessions are live. Ctrl+C to end them.');
 
   const end = async () => {
     for (const [id, cwd] of [A, B, C, D]) await ev(id, cwd, 'SessionEnd', { reason: 'exit' });
+    await removeDemoAgents();
     process.exit(0);
   };
   process.on('SIGINT', end);

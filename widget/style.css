@@ -212,3 +212,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .switch .knob { position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--muted); transition: left .15s; }
 .switch.on { background: var(--accent); }
 .switch.on .knob { left: 15px; background: var(--on-accent); }
+
+/* service agents */
+.section-head { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; margin: 6px 4px 0; }
+.avatar.bot { border-radius: 5px; height: 30px; }
+.avatar.bot .eye { top: 10px; height: 5px; border-radius: 1px; }
+.avatar.bot .mouth { top: 19px; }
+.avatar.bot.ag-working .eye { animation: blink 3.6s infinite; }
+.avatar.bot.ag-waiting, .avatar.bot.ag-not_responding { animation: hop .9s ease-in-out infinite; }
+.avatar.bot.ag-not_responding { filter: grayscale(.8); }
+.card.agent.attention { border-color: var(--approval); box-shadow: none; }
+.card.agent.ag-error.attention, .card.agent.ag-not_responding.attention { border-color: var(--error); }
+.status.ag-working { color: var(--accent); }
+.status.ag-waiting { color: var(--approval); }
+.status.ag-error, .status.ag-not_responding { color: var(--error); }
+.status.ag-idle { color: var(--idle); }
+.ag-wait { color: var(--approval); }
+.ag-last { margin-left: auto; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d-text.link { color: var(--question); text-decoration: none; cursor: pointer; }
+.d-text.link:hover { text-decoration: underline; }
+.d-type.bad, .d-text.bad { color: var(--error); }
+.mini.square { border-radius: 2px; }

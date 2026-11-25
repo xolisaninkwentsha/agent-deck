@@ -1,5 +1,5 @@
 // Agent Deck panel: a small frameless window that stays on top of everything.
-const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut, nativeTheme, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -293,6 +293,15 @@ ipcMain.on('notify', (_e, { title, body, target }) => {
     if (target && win && !win.isDestroyed()) win.webContents.send('jump', target);
   });
   n.show();
+});
+
+// Links from service agents (a Chat thread, an email) open in the browser: web links only.
+ipcMain.on('open-link', (_e, url) => {
+  let u;
+  try { u = new URL(String(url)); } catch { return; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return;
+  console.log(`[agent-deck] open link: ${u.origin}${process.env.AGENT_DECK_NO_OPEN ? ' (not opened: AGENT_DECK_NO_OPEN)' : ''}`);
+  if (!process.env.AGENT_DECK_NO_OPEN) shell.openExternal(u.href);
 });
 
 ipcMain.on('quit', () => app.quit());

@@ -16,6 +16,7 @@ import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
 import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
+import { newAgent, applyAgentEvent, agentView, agentStatus, AGENT_NAME, nextRun, cronJobs } from './agents.mjs';
 
 const VERSION = '0.1.0';
 const cfg = loadConfig();
@@ -54,6 +55,8 @@ if (!isLoopback(BIND) && !cfg.token) {
 
 /** @type {Map<string, any>} */
 const sessions = new Map();
+/** service agents (see agents.mjs), key -> state */
+const agents = new Map();
 /** pending id -> { key, resolve, timer, hookEvent, toolInput, suggestions, kind } */
 const pendings = new Map();
 /** question fingerprint -> time it was handed back to the terminal */
@@ -73,7 +76,8 @@ function loadState() {
     for (const s of saved.sessions || []) {
       if (!s.ended && pidAlive(s.pid)) { s.pending = null; sessions.set(s.key, s); }
     }
-    log(`restored ${sessions.size} session(s)`);
+    for (const a of saved.agents || []) if (a && a.key) agents.set(a.key, a);
+    log(`restored ${sessions.size} session(s), ${agents.size} agent(s)`);
   } catch {}
 }
 let saveTimer = null;
@@ -81,7 +85,7 @@ function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     const list = [...sessions.values()].map((s) => ({ ...s, pending: null }));
-    fs.writeFile(STATE_PATH, JSON.stringify({ sessions: list }), () => {});
+    fs.writeFile(STATE_PATH, JSON.stringify({ sessions: list, agents: [...agents.values()] }), () => {});
   }, 500);
 }
 
@@ -91,6 +95,7 @@ function snapshot() {
   return {
     type: 'snapshot', host: NAME, version: VERSION, holdSeconds: HOLD_MS / 1000,
     sessions: [...sessions.values()].filter((s) => !s.dismissed).map((s) => publicView(s, { warnPercent: Number(cfg.contextWarnPercent) || 80 })),
+    agents: [...agents.values()].map((a) => agentView(a)),
   };
 }
 function broadcast() {
@@ -403,6 +408,38 @@ async function handleHook(body, res) {
   return output;
 }
 
+// ---------- service agents (POST /agent) ----------
+function handleAgent(body) {
+  const name = String(body?.agent || '');
+  if (!AGENT_NAME.test(name)) return { ok: false, error: 'agent name must be letters, digits, dot, dash or underscore' };
+  const key = `${NAME}:${name}`;
+  let a = agents.get(key);
+  if (!a) { a = newAgent(key, name, NAME); agents.set(key, a); log(`agent "${name}" reporting`); }
+  if (!applyAgentEvent(a, body)) return { ok: false, error: `unknown event "${body.event}"` };
+  if (body.event === 'start') refreshSchedules().catch(() => {});
+  a.lastStatus = agentStatus(a);
+  broadcast();
+  return { ok: true };
+}
+
+// An agent's cron jobs come from the crontab (the agents don't have to report them), unless
+// the agent sends its own "schedule". AGENT_DECK_CRONTAB=/file reads a file instead (tests).
+function readCrontab() {
+  if (process.env.AGENT_DECK_CRONTAB) return fs.promises.readFile(process.env.AGENT_DECK_CRONTAB, 'utf8').catch(() => '');
+  return new Promise((resolve) => execFile('crontab', ['-l'], { timeout: 3000 }, (err, out) => resolve(err ? '' : out)));
+}
+async function refreshSchedules() {
+  const crontab = await readCrontab();
+  let changed = false;
+  for (const a of agents.values()) {
+    if (!a.cwd || a.scheduleFrom === 'agent') continue;
+    const schedule = cronJobs(crontab, a.cwd).map((j) => ({ job: j.job, nextRun: nextRun(j.cron) })).filter((s) => s.nextRun);
+    if (JSON.stringify(schedule) !== JSON.stringify(a.schedule)) { a.schedule = schedule; a.scheduleFrom = 'crontab'; changed = true; }
+  }
+  if (changed) broadcast();
+}
+setInterval(() => refreshSchedules().catch(() => {}), 60000).unref();
+
 // ---------- widget commands ----------
 function handleWidgetMessage(ws, msg) {
   switch (msg.type) {
@@ -433,6 +470,10 @@ function handleWidgetMessage(ws, msg) {
       if (s) jumpTo(s);
       break;
     }
+    case 'dismiss-agent':
+      // Comes back with the agent's next event.
+      if (agents.delete(msg.key)) broadcast();
+      break;
   }
 }
 
@@ -476,6 +517,11 @@ setInterval(() => {
     else if (!s.ended && now - s.lastAt > 12 * 3600 * 1000 && !s.pid) { sessions.delete(s.key); changed = true; }
   }
   for (const [fp, t] of releasedQuestions) if (now - t > 300000) releasedQuestions.delete(fp);
+  // Agents whose heartbeat stopped turn "not responding" with no event to tell us: check here.
+  for (const a of agents.values()) {
+    const st = agentStatus(a, now);
+    if (st !== a.lastStatus) { if (a.lastStatus) log(`agent "${a.name}" is now ${st}`); a.lastStatus = st; changed = true; }
+  }
   if (changed) broadcast();
 }, 2000).unref();
 
@@ -485,6 +531,20 @@ function handleRequest(req, res) {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, name: NAME, version: VERSION, sessions: sessions.size }));
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/agent') {
+    // Service agents report from this machine only, like hooks.
+    if (!isLoopback(remote)) { res.writeHead(403).end(); return; }
+    let raw = '';
+    req.setEncoding('utf8');
+    req.on('data', (c) => { raw += c; if (raw.length > 65536) req.destroy(); });
+    req.on('end', () => {
+      let out;
+      try { out = handleAgent(JSON.parse(raw)); } catch (e) { out = { ok: false, error: 'bad JSON' }; }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(out));
+    });
     return;
   }
   if (req.method === 'POST' && req.url === '/hook') {

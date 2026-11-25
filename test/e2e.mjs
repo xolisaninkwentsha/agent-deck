@@ -15,7 +15,9 @@ fs.writeFileSync(path.join(HOME, 'config.json'), JSON.stringify({ port: PORT, ho
 // A fake ~/.claude, so the daemon doesn't pick up the real sessions on this machine.
 const CLAUDE = path.join(HOME, 'claude');
 fs.mkdirSync(path.join(CLAUDE, 'sessions'), { recursive: true });
-const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE };
+const CRONTAB = path.join(HOME, 'crontab'); // instead of the real `crontab -l`
+fs.writeFileSync(CRONTAB, '');
+const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, AGENT_DECK_CRONTAB: CRONTAB };
 const sleepers = []; // stand-ins for running Claude Code processes
 const fakeProcess = () => { const p = spawn('sleep', ['120']); sleepers.push(p); return p; };
 const sessionFile = (pid, fields) => fs.writeFileSync(path.join(CLAUDE, 'sessions', `${pid}.json`), JSON.stringify({ pid, ...fields }));
@@ -333,6 +335,125 @@ async function main() {
   await heldNew;
   setHold(5);
   ok('a hold time changed in the settings applies to the next prompt without restarting the daemon');
+
+  // 9m. Service agents over POST /agent.
+  const agentPost = (body, host = '127.0.0.1', port = PORT) => fetch(`http://${host}:${port}/agent`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }).then((res) => (res.status === 200 ? res.json() : { status: res.status }));
+  const ag = (name) => snap.agents?.find((a) => a.name === name);
+  fs.writeFileSync(CRONTAB, [
+    'CRON_TZ=Africa/Johannesburg', 'APP=/work/fin', 'RUN=flock data/x.lock .venv/bin/python -m fin_agent',
+    '47 7 * * 1-5  cd $APP && $RUN daily >> data/cron.log 2>&1', '52 7 * * 1  cd $APP && $RUN weekly',
+    '15 * * * *  cd /work/elsewhere && .venv/bin/python -m other_agent hourly', '',
+  ].join('\n'));
+  assert.equal((await agentPost({ agent: 'fin-agent', event: 'start', name: 'Finance agent', description: 'Billing', heartbeat: 1, cwd: '/work/fin' })).ok, true);
+  const beat = setInterval(() => agentPost({ agent: 'fin-agent', event: 'heartbeat' }).catch(() => {}), 300);
+  await until(() => ag('fin-agent')?.schedule.length === 2, 'agent schedule from the crontab', 60);
+  assert.deepEqual(ag('fin-agent').schedule.map((s) => s.job).sort(), ['daily', 'weekly']);
+  assert.equal(ag('fin-agent').status, 'idle');
+  assert.equal(ag('fin-agent').displayName, 'Finance agent');
+  ok('agent: "start" registers it, and its cron jobs come from the crontab');
+
+  await agentPost({ agent: 'fin-agent', event: 'job_start', job: 'daily', detail: 'morning run' });
+  await agentPost({ agent: 'fin-agent', event: 'step', text: 'Matching payments' });
+  await until(() => ag('fin-agent')?.status === 'working' && ag('fin-agent').step === 'Matching payments', 'agent working');
+  assert.equal(ag('fin-agent').job.job, 'daily');
+  await agentPost({ agent: 'fin-agent', event: 'waiting', id: 'bill-42', title: 'Approve supplier bill 42', link: 'https://chat.google.com/room/AAA/BBB' });
+  await agentPost({ agent: 'fin-agent', event: 'waiting', id: 'evil', title: 'Not a web link', link: 'javascript:alert(1)' });
+  await until(() => ag('fin-agent')?.waiting.length === 2, 'two items waiting');
+  assert.equal(ag('fin-agent').status, 'waiting');
+  assert.equal(ag('fin-agent').waiting.find((w) => w.id === 'bill-42').link, 'https://chat.google.com/room/AAA/BBB');
+  assert.equal(ag('fin-agent').waiting.find((w) => w.id === 'evil').link, '');
+  for (const id of ['bill-42', 'evil']) await agentPost({ agent: 'fin-agent', event: 'resolved', id });
+  await agentPost({ agent: 'fin-agent', event: 'job_end', job: 'daily', result: 'ok', summary: '3 reminders sent' });
+  await until(() => ag('fin-agent')?.status === 'idle' && ag('fin-agent').lastJob?.summary === '3 reminders sent', 'job finished');
+  assert.equal(ag('fin-agent').lastJob.result, 'ok');
+  ok('agent: job, step, waiting (only web links kept), resolved, job end');
+
+  await agentPost({ agent: 'fin-agent', event: 'error', message: 'Xero sign-in expired' });
+  await until(() => ag('fin-agent')?.status === 'error', 'agent error');
+  await agentPost({ agent: 'fin-agent', event: 'job_start', job: 'weekly' });
+  await until(() => ag('fin-agent')?.status === 'working', 'a new job clears the error');
+  await agentPost({ agent: 'fin-agent', event: 'job_end', job: 'weekly', result: 'error', summary: 'RuntimeError: boom' });
+  await until(() => ag('fin-agent')?.status === 'error' && ag('fin-agent').lastError?.message === 'RuntimeError: boom', 'failed job');
+  assert.equal((await agentPost({ agent: 'bad name!', event: 'start' })).ok, false);
+  assert.equal((await agentPost({ agent: 'fin-agent', event: 'explode' })).ok, false);
+  ok('agent: errors show until the next job; bad names and unknown events are refused');
+
+  clearInterval(beat);
+  await until(() => ag('fin-agent')?.status === 'not_responding', 'not responding after 3x the heartbeat', 80);
+  await agentPost({ agent: 'fin-agent', event: 'heartbeat' });
+  await until(() => ag('fin-agent')?.status !== 'not_responding', 'back after a heartbeat');
+  ok('agent: no heartbeat for 3x its interval shows "not responding"; a heartbeat brings it back');
+
+  // 9m2. The cron matcher on fixed (local) times.
+  const { nextRun } = await import('../src/agents.mjs');
+  const wed0800 = new Date(2026, 10, 25, 8, 0).getTime(); // Wed 25 Nov 2026 08:00
+  const at = (y, mo, d, h, mi) => new Date(y, mo - 1, d, h, mi).getTime();
+  assert.equal(nextRun('47 7 * * 1-5', wed0800), at(2026, 11, 26, 7, 47));      // next weekday morning
+  assert.equal(nextRun('*/30 7-19 * * 1-5', wed0800), at(2026, 11, 25, 8, 0));  // right now counts
+  assert.equal(nextRun('57 7 1 * *', wed0800), at(2026, 12, 1, 7, 57));         // month end run
+  assert.equal(nextRun('30 5 * * 1', wed0800), at(2026, 11, 30, 5, 30));         // Monday
+  assert.equal(nextRun('0 9 * * 6,0', wed0800), at(2026, 11, 28, 9, 0));         // weekend list
+  assert.equal(nextRun('not a cron', wed0800), null);
+  ok('cron matcher: weekdays, steps, ranges, month days, lists');
+
+  // 9n. The Python client against the daemon, and with no daemon at all.
+  const CLIENT_DIR = path.join(ROOT, 'clients', 'python');
+  const py = (code, port) => new Promise((resolve) => {
+    const t = Date.now();
+    const p = spawn('python3', ['-I', '-c', `import sys; sys.path.insert(0, ${JSON.stringify(CLIENT_DIR)})\n${code}`], { env: { ...env, AGENT_DECK_PORT: String(port) } });
+    let out = '', err = '';
+    p.stdout.on('data', (c) => { out += c; });
+    p.stderr.on('data', (c) => { err += c; });
+    p.on('close', (code) => resolve({ code, out, err, ms: Date.now() - t }));
+  });
+  const pyAgent = [
+    'from agent_deck import Deck',
+    'd = Deck("py-agent")',
+    'd.start("from python", heartbeat=0)',
+    'with d.job("nightly", "test run") as j:',
+    '    d.step("crunching")',
+    '    d.waiting("w1", "Check the draft", "https://mail.google.com/mail/u/0/#inbox/abc")',
+    '    j.summary = "done"',
+    'try:',
+    '    with d.job("broken"):',
+    '        raise ValueError("nope")',
+    'except ValueError:',
+    '    print("re-raised")',
+  ].join('\n');
+  r = await py(pyAgent, PORT);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out.trim(), 're-raised');
+  await until(() => ag('py-agent')?.recent.length === 2, 'python agent jobs', 60);
+  assert.deepEqual(ag('py-agent').recent.map((j) => [j.job, j.result]), [['broken', 'error'], ['nightly', 'ok']]);
+  assert.equal(ag('py-agent').recent[1].summary, 'done');
+  assert.equal(ag('py-agent').recent[0].summary, 'ValueError: nope');
+  assert.equal(ag('py-agent').waiting[0].title, 'Check the draft');
+  ok('Python client: job/step/waiting/summary arrive; the job\'s own exception is re-raised');
+  r = await py(pyAgent, PORT + 500); // nothing listens there
+  assert.equal(r.code, 0, r.err);
+  assert.ok(r.ms < 2500, `took ${r.ms} ms`);
+  ok('Python client: with no daemon it neither raises nor hangs');
+
+  // 9o. /agent and /hook only take requests from this machine.
+  const lan = Object.values(os.networkInterfaces()).flat().find((a) => a && a.family === 'IPv4' && !a.internal)?.address;
+  if (!lan) {
+    console.log('  - skipped the remote-request check: no LAN address on this machine');
+  } else {
+    const HOME2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-remote-'));
+    const PORT2 = PORT + 1;
+    fs.writeFileSync(path.join(HOME2, 'config.json'), JSON.stringify({ port: PORT2, bind: lan, token: 'x'.repeat(32), name: 'remote-test' }));
+    const d2 = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: { ...env, AGENT_DECK_HOME: HOME2, AGENT_DECK_PORT: String(PORT2) } });
+    try {
+      for (let i = 0; i < 40; i++) { try { await fetch(`http://${lan}:${PORT2}/health`); break; } catch { await sleep(100); } }
+      assert.equal((await agentPost({ agent: 'intruder', event: 'start' }, lan, PORT2)).status, 403);
+      const hookRes = await fetch(`http://${lan}:${PORT2}/hook`, { method: 'POST', body: '{}' });
+      assert.equal(hookRes.status, 403);
+      assert.equal((await agentPost({ agent: 'local-ok', event: 'start' }, '127.0.0.1', PORT2)).ok, true);
+    } finally { d2.kill(); }
+    ok('a request from another machine to /agent or /hook is refused (403); loopback is accepted');
+  }
 
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));
