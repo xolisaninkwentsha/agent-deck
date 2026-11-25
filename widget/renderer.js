@@ -14,6 +14,7 @@ const ICONS = {
   down: '<svg viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6"/></svg>',
   jump: '<svg viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 5 11M3 6v7h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+  gear: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
 };
 
 const state = {
@@ -27,7 +28,53 @@ const state = {
   seen: new Map(),     // session key -> { status, since, pending } from the last snapshot
   notified: new Map(), // session key -> time of its last notification
   notifyAfter: 30,     // seconds of work before "Done, your turn" is worth a notification
+  settingsOpen: false,
+  cfg: {},             // panel settings from the main process (rendererConfig in main.cjs)
 };
+
+// ---------- settings ----------
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme; // System: follow the desktop
+}
+function applyConfig(cfg) {
+  state.cfg = cfg;
+  state.settingsDirty = true;
+  state.notifyAfter = cfg.notifyAfterSeconds || 30;
+  applyTheme(cfg.theme);
+}
+function saveSetting(patch) {
+  window.deck.saveSettings(patch);
+  applyConfig({ ...state.cfg, ...patch });
+  render();
+}
+const prettyKey = (accel) => String(accel || '').replace(/Control|CommandOrControl|CmdOrCtrl/g, 'Ctrl');
+
+function settingsView() {
+  const c = state.cfg;
+  const row = (label, hint, control) => h('div', { class: 'set-row' },
+    h('div', { class: 'set-label' }, h('div', { text: label }), hint ? h('div', { class: 'set-hint', text: hint }) : null), control);
+  const toggle = (on, onChange) => h('button', { class: 'switch' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(on), onclick: () => onChange(!on) }, h('span', { class: 'knob' }));
+  const select = (value, options, onChange, unit = '') => {
+    if (!options.some(([v]) => String(v) === String(value))) options = [[value, String(value) + unit], ...options]; // a value set by hand
+    return h('select', {
+      class: 'set-select',
+      onchange: (e) => { const v = e.target.value; onChange(/^\d+$/.test(v) ? Number(v) : v); },
+    }, options.map(([v, label]) => h('option', { value: String(v), text: label, selected: String(v) === String(value) })));
+  };
+  const linuxNoGnome = c.platform === 'linux' && c.shortcutVia !== 'gnome';
+  return h('div', { class: 'settings' },
+    row('Answer approvals and questions here', 'Off: the panel only watches', toggle(state.approvals, (v) => setApprovals(v, true))),
+    row('Panel can answer for', 'The terminal shows the prompt meanwhile. This machine only.',
+      select(c.holdSeconds, [[60, '1 min'], [120, '2 min'], [300, '5 min'], [540, '9 min']], (v) => saveSetting({ holdSeconds: v }), ' s')),
+    row('Notifications', null, toggle(c.notifications !== false, (v) => saveSetting({ notifications: v }))),
+    row('Notify "done" after', 'of work, so quick replies stay quiet',
+      select(c.notifyAfterSeconds, [[10, '10 s'], [30, '30 s'], [60, '1 min'], [120, '2 min']], (v) => saveSetting({ notifyAfterSeconds: v }), ' s')),
+    row('Context warning at', null, select(c.contextWarnPercent, [[70, '70%'], [80, '80%'], [90, '90%']], (v) => saveSetting({ contextWarnPercent: v }), '%')),
+    row('Theme', null, select(c.theme || 'system', [['system', 'System'], ['dark', 'Dark'], ['light', 'Light']], (v) => saveSetting({ theme: v }))),
+    row('Show/hide shortcut', linuxNoGnome ? 'Run "agent-deck shortcut" so it works in every app' : null,
+      h('span', { class: 'set-value', text: c.shortcut ? prettyKey(c.shortcut) + (c.shortcutVia === 'gnome' ? ' (GNOME)' : '') : 'none' })));
+}
 
 // ---------- tiny DOM helper ----------
 function h(tag, props, ...children) {
@@ -144,6 +191,7 @@ const release = (hub, pendingId) => send(hub, { type: 'release', pendingId });
 
 function setApprovals(enabled, tellMain) {
   state.approvals = Boolean(enabled);
+  state.settingsDirty = true;
   if (tellMain) window.deck.setApprovals(state.approvals);
   for (const hub of state.hubs) send(hub, { type: 'approvals', enabled: state.approvals });
   render();
@@ -310,6 +358,10 @@ function render() {
   approvalsBtn.title = state.approvals ? 'Approvals and questions come here first (click to send them to the terminal only)' : 'Approvals go to the terminal only (click to answer them here)';
   approvalsBtn.classList.toggle('on', state.approvals);
   document.getElementById('btn-collapse').innerHTML = state.collapsed ? ICONS.down : ICONS.up;
+  const gear = document.getElementById('btn-settings');
+  gear.innerHTML = ICONS.gear;
+  gear.classList.toggle('on', state.settingsOpen);
+  gear.title = state.settingsOpen ? 'Back to sessions' : 'Settings';
 
   const dots = document.getElementById('dots');
   dots.replaceChildren(...(state.collapsed ? items.map(({ s }) => h('span', { class: `mini st-${s.status}`, title: `${s.project}: ${s.step}` })) : []));
@@ -317,7 +369,11 @@ function render() {
   if (!state.composing) {
     const list = document.getElementById('list');
     list.hidden = state.collapsed;
-    if (!items.length) {
+    if (state.settingsOpen) {
+      // Rebuild only when a setting changed: a snapshot re-render would close an open dropdown.
+      if (state.settingsDirty || !list.querySelector('.settings')) list.replaceChildren(settingsView());
+      state.settingsDirty = false;
+    } else if (!items.length) {
       const anyConnected = state.hubs.some((x) => x.connected);
       list.replaceChildren(h('div', { class: 'empty' },
         anyConnected ? 'No Claude Code sessions yet.' : 'Connecting to the Agent Deck daemon…',
@@ -355,7 +411,12 @@ document.getElementById('btn-close').addEventListener('click', () => window.deck
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (document.activeElement?.classList.contains('other')) { document.activeElement.blur(); return; }
-  state.collapsed = true;
+  if (state.settingsOpen) state.settingsOpen = false; else state.collapsed = true;
+  render();
+});
+document.getElementById('btn-settings').addEventListener('click', () => {
+  state.settingsOpen = !state.settingsOpen;
+  if (state.settingsOpen) state.collapsed = false;
   render();
 });
 window.deck.onApprovals((enabled) => setApprovals(enabled, false));
@@ -367,9 +428,9 @@ window.deck.onJump((target) => {
 
 window.deck.config().then((cfg) => {
   state.approvals = cfg.approvalsInWidget;
-  state.notifyAfter = cfg.notifyAfterSeconds || 30;
+  applyConfig(cfg);
   document.body.classList.add('os-' + cfg.platform);
   setHubs(cfg.hubs);
 });
-window.deck.onConfigChanged((cfg) => setHubs(cfg.hubs));
+window.deck.onConfigChanged((cfg) => { applyConfig(cfg); setHubs(cfg.hubs); });
 render();

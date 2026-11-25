@@ -40,6 +40,8 @@ export const DEFAULTS = {
   shortcutVia: null,
   // Widget only: hidden with the tray icon / shortcut when it last closed.
   panelHidden: false,
+  // Widget only: 'system', 'dark' or 'light'.
+  theme: 'system',
   // Widget only: desktop notifications (also in the tray menu).
   notifications: true,
   // Widget only: "Done, your turn" only after a session worked at least this long.

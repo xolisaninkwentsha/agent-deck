@@ -1,5 +1,5 @@
 // Agent Deck panel: a small frameless window that stays on top of everything.
-const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut, nativeTheme } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -154,6 +154,7 @@ async function createWindow() {
   config = await import(pathToFileURL(path.join(__dirname, '..', 'src', 'config.mjs')).href);
   const cfg = config.loadConfig();
   const pos = startPosition(cfg);
+  applyTheme(cfg.theme);
 
   win = new BrowserWindow({
     width: WIDTH, height: 140, x: pos.x, y: pos.y,
@@ -162,7 +163,7 @@ async function createWindow() {
     frame: false, resizable: true, maximizable: false, minimizable: false, fullscreenable: false,
     minWidth: WIDTH, maxWidth: WIDTH,
     alwaysOnTop: true, skipTaskbar: true, show: false,
-    backgroundColor: '#111315', hasShadow: true, title: 'Agent Deck',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? BG.dark : BG.light, hasShadow: true, title: 'Agent Deck',
     icon: nativeImage.createFromPath(path.join(__dirname, 'icon.png')),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false },
   });
@@ -229,8 +230,38 @@ async function createWindow() {
 
 function rendererConfig() {
   const cfg = config.loadConfig();
-  return { hubs: hubsFor(cfg), approvalsInWidget: cfg.approvalsInWidget !== false, platform: process.platform, notifyAfterSeconds: Number(cfg.notifyAfterSeconds) || 30 };
+  return {
+    hubs: hubsFor(cfg), approvalsInWidget: cfg.approvalsInWidget !== false, platform: process.platform,
+    notifyAfterSeconds: Number(cfg.notifyAfterSeconds) || 30, holdSeconds: Number(cfg.holdSeconds) || 300,
+    notifications: cfg.notifications !== false, contextWarnPercent: Number(cfg.contextWarnPercent) || 80,
+    theme: cfg.theme || 'system', shortcut: cfg.shortcut || '', shortcutVia: cfg.shortcutVia || null,
+  };
 }
+
+// Theme: Electron's themeSource also drives prefers-color-scheme inside the page.
+const BG = { dark: '#111315', light: '#f4f5f7' };
+function applyTheme(theme) {
+  nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
+  if (win && !win.isDestroyed()) win.setBackgroundColor(nativeTheme.shouldUseDarkColors ? BG.dark : BG.light);
+}
+
+// Settings view in the panel: only these keys, only these values.
+const SETTINGS = {
+  approvalsInWidget: (v) => typeof v === 'boolean',
+  holdSeconds: (v) => [60, 120, 300, 540].includes(v),
+  notifications: (v) => typeof v === 'boolean',
+  notifyAfterSeconds: (v) => [10, 30, 60, 120].includes(v),
+  contextWarnPercent: (v) => [70, 80, 90].includes(v),
+  theme: (v) => ['system', 'dark', 'light'].includes(v),
+};
+ipcMain.on('save-settings', (_e, patch) => {
+  const clean = {};
+  for (const [k, v] of Object.entries(patch || {})) if (SETTINGS[k]?.(v)) clean[k] = v;
+  if ('approvalsInWidget' in clean) { setApprovals(clean.approvalsInWidget, false); delete clean.approvalsInWidget; }
+  if (Object.keys(clean).length) config.saveConfig(clean);
+  if ('theme' in clean) applyTheme(clean.theme);
+  updateTray();
+});
 
 ipcMain.handle('config', () => rendererConfig());
 

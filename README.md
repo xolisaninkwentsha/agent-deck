@@ -93,6 +93,19 @@ The file isn't a documented Claude Code format (checked with 2.1.332). If it cha
 - `agent-deck toggle | show | hide` does the same from a terminal or script.
 - **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `agent-deck shortcut` once. It adds a GNOME custom shortcut ("Agent Deck" in Settings > Keyboard > Custom Shortcuts) that runs `agent-deck toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `agent-deck shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
 
+## Settings
+
+The **gear** in the panel header opens the settings; Esc or the gear goes back.
+
+- Answer approvals and questions here (the same as the shield)
+- How long the panel can answer a prompt: 1, 2, 5 or 9 minutes. This setting belongs to this machine's daemon, applies to new prompts straight away, and doesn't change other machines.
+- Notifications on/off, and how long a session must work before "Done, your turn" notifies
+- Context warning threshold
+- Theme: System (follows the desktop), Dark or Light
+- The show/hide shortcut (read-only; `agent-deck shortcut` sets it up on GNOME)
+
+Each change is saved to `~/.agent-deck/config.json` immediately.
+
 ## Notifications
 
 The panel sends a desktop notification when:
@@ -148,6 +161,7 @@ agent-deck start | stop | restart        # the daemon
 | `approvalsInWidget` | true | the shield button |
 | `shortcut` | `Control+Alt+A` | shows/hides the panel |
 | `shortcutVia` | none | `gnome` after `agent-deck shortcut` (the panel then doesn't grab the key) |
+| `theme` | `system` | `system`, `dark` or `light` |
 | `notifications` | true | desktop notifications (also in the tray menu) |
 | `notifyAfterSeconds` | 30 | "Done, your turn" only after this much work |
 | `contextWarnPercent` | 80 | context meter turns amber from here |

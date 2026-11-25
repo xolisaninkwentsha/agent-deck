@@ -314,6 +314,19 @@ async function main() {
   assert.equal(cs().context.window, 1000000);
   ok('context meter: more than 200K in use means the window is bigger (1M)');
 
+  // 9l. The panel's settings change holdSeconds in config.json; the daemon picks it up live.
+  const cfgFile = path.join(HOME, 'config.json');
+  const setHold = (n) => fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), holdSeconds: n }));
+  setHold(7);
+  await until(() => snap.holdSeconds === 7, 'daemon reloaded holdSeconds', 60);
+  const heldNew = hook('decide', base('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'echo hold' }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.detail === 'echo hold', 'hold with the new time');
+  assert.equal(sess().pending.expiresAt - sess().pending.createdAt, 7000);
+  ws.send(JSON.stringify({ type: 'release', pendingId: sess().pending.id }));
+  await heldNew;
+  setHold(5);
+  ok('a hold time changed in the settings applies to the next prompt without restarting the daemon');
+
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));
   await hook('observe', base('SubagentStart', { agent_id: 'ag1', agent_type: 'Explore' }));

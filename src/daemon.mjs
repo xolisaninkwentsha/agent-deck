@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import {
-  loadConfig, ensureHome, machineName, isLoopback, tokensMatch, STATE_PATH, LOG_PATH, PID_PATH,
+  loadConfig, ensureHome, machineName, isLoopback, tokensMatch, STATE_PATH, LOG_PATH, PID_PATH, CONFIG_PATH,
 } from './config.mjs';
 import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
@@ -24,9 +24,10 @@ const PORT = Number(cfg.port);
 const BIND = cfg.bind;
 // How long the panel can answer a prompt. Claude Code shows the same prompt in the terminal
 // meanwhile, so a long hold costs nothing there. Capped below the decide hooks' 600 s timeout.
-const HOLD_MS = Math.min(570, Math.max(5, Number(cfg.holdSeconds) || 300)) * 1000;
+const holdFrom = (c) => Math.min(570, Math.max(5, Number(c.holdSeconds) || 300)) * 1000;
+let HOLD_MS = holdFrom(cfg);
 // A question held on PreToolUse is NOT shown in the terminal while held, so keep that short.
-const PRETOOLUSE_HOLD_MS = Math.min(HOLD_MS, 90000);
+let PRETOOLUSE_HOLD_MS = Math.min(HOLD_MS, 90000);
 // Which hook the panel answers a question (AskUserQuestion) on. While the PermissionRequest
 // for AskUserQuestion is pending, Claude Code already shows the question in the terminal, so
 // answering there never keeps someone at the terminal waiting. That was verified live (Claude
@@ -541,6 +542,20 @@ function handleUpgrade(req, socket, head) {
     ws.send(JSON.stringify(snapshot()));
   });
 }
+
+// Settings the panel can change while the daemon runs (port, bind, token and name need a restart).
+fs.watchFile(CONFIG_PATH, { interval: 2000 }, () => {
+  const next = loadConfig();
+  const hold = holdFrom(next);
+  if (hold !== HOLD_MS) {
+    HOLD_MS = hold;
+    PRETOOLUSE_HOLD_MS = Math.min(HOLD_MS, 90000);
+    log(`panel can now answer for ${HOLD_MS / 1000}s (new prompts)`);
+  }
+  cfg.contextWarnPercent = next.contextWarnPercent;
+  cfg.contextWindows = next.contextWindows;
+  broadcast();
+}).unref();
 
 loadState();
 let listening = 0;
