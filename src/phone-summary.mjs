@@ -28,8 +28,9 @@ const MASKS = [
   // JSON "api_key": "x" (also shell-escaped \"api_key\": \"x\", escapes inside the value, and bare numbers).
   // A matched label always masks its value. An escaped value ends at the first \" followed by , } ] " or the end
   // (so a secret holding \" isn't cut early), else at the next \", else at whitespace; a plain one at its closing " or whitespace.
+  // The whitespace fallbacks take quotes too, so a ' or " inside the secret can't leave its tail visible.
   // The first scan is bounded by the masking input cap so many labels can't make it quadratic.
-  [/((?:key|token|secret|password)[^"\\]{0,64}\\?"\s*:\s*)(?:(\\")(?:[^]{0,2000}?(?=\\"\s*(?:[,}\]"]|$))|[^]*?(?=\\")|[^\s"']+)(\\")?|(")(?:(?:[^"\\]|\\.)*(")|[^\s"']+)|[^\s,}\]"\\]+)/gi,
+  [/((?:key|token|secret|password)[^"\\]{0,64}\\?"\s*:\s*)(?:(\\")(?:[^]{0,2000}?(?=\\"\s*(?:[,}\]"]|$))|[^]*?(?=\\")|\S+)(\\")?|(")(?:(?:[^"\\]|\\.)*(")|\S+)|[^\s,}\]"\\]+)/gi,
     (_, label, escOpen, escClose, open, close) => `${label}${escOpen || open || ''}${MASK}${escClose || close || ''}`],
   // scheme://user:pass@host
   [/(\b[a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]+:[^\s/@]+@/gi, `$1${MASK}@`],

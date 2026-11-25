@@ -50,6 +50,8 @@ function main() {
   assert.equal(maskSecrets('echo \\"password\\": \\"hunter2\\" next'), `echo \\"password\\": \\"${M}\\" next`);
   assert.equal(maskSecrets('echo \\"password\\": \\"hunter2 next'), `echo \\"password\\": \\"${M} next`);
   assert.equal(maskSecrets('echo {"password": "hunter2 next'), `echo {"password": "${M} next`);
+  assert.equal(maskSecrets('echo \\"password\\": \\"hun\'ter2 next'), `echo \\"password\\": \\"${M} next`);
+  assert.equal(maskSecrets('echo {"password": "hun\'ter2 next'), `echo {"password": "${M} next`);
   check('a matched JSON label always masks its value, even when no terminator or closing quote follows');
 
   assert.equal(maskSecrets('X-' + 'a'.repeat(100) + '-Api-Key: s3cret'), 'X-' + 'a'.repeat(100) + `-Api-Key: ${M}`);
