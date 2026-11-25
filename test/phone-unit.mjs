@@ -35,7 +35,21 @@ function main() {
   assert.equal(maskSecrets('{"password": "hun\\"ter2"}'), `{"password": "${M}"}`);
   assert.equal(maskSecrets('{"token": "a\\\\b"}'), `{"token": "${M}"}`);
   assert.equal(maskSecrets('{"api_key": "ABC"}'), `{"api_key": "${M}"}`);
+  assert.equal(maskSecrets('curl -d "{\\"password\\": \\"hun\\\\\\"ter2\\"}" https://x.io'), `curl -d "{\\"password\\": \\"${M}\\"}" https://x.io`);
   check('masks JSON values that contain escapes');
+
+  assert.equal(maskSecrets('X-' + 'a'.repeat(100) + '-Api-Key: s3cret'), 'X-' + 'a'.repeat(100) + `-Api-Key: ${M}`);
+  assert.equal(maskSecrets('A'.repeat(100) + '_TOKEN=abc'), 'A'.repeat(100) + `_TOKEN=${M}`);
+  assert.equal(maskSecrets('{"' + 'k'.repeat(100) + '_token": "abc"}'), '{"' + 'k'.repeat(100) + `_token": "${M}"}`);
+  check('masks values behind very long header, variable and JSON key names');
+
+  for (const cmd of ['sudo mysql -phunter2 db', 'env X=1 mysql -phunter2 db', 'MYSQL_HOST=h mysql -phunter2 db', 'docker exec c mysql -uroot -phunter2', 'echo $(mysql -phunter2 -e "select 1")', 'cd /x\nmysql -phunter2 db', 'mariadb-admin -phunter2 ping', '/usr/bin/mysql.exe -phunter2 db']) {
+    const out = maskSecrets(cmd);
+    assert.ok(!out.includes('hunter2') && out.includes(`-p${M}`), `-p password left in: ${out}`);
+  }
+  assert.equal(maskSecrets('mysql -u root -p"x y" db'), `mysql -u root -p${M} db`);
+  assert.equal(maskSecrets("mysql -u root -p'x y' db"), `mysql -u root -p${M} db`);
+  check('masks -p passwords after wrappers, env prefixes, subshells, newlines and in quotes');
 
   for (const hostile of ['a'.repeat(50000) + '-key', 'x-'.repeat(25000), 'K'.repeat(50000), '"key' + ' '.repeat(50000), 'a'.repeat(50000) + '://']) {
     const t0 = performance.now();
@@ -58,7 +72,7 @@ function main() {
   assert.equal(maskSecrets('DB_PASSWORD=\'a b\' run'), `DB_PASSWORD=${M} run`);
   check('masks quoted NAME=value values');
 
-  for (const plain of ['serve -p 8080', 'docker run -p 3000:3000 img', 'find . -print', 'mysql -u root app', 'curl -H "Accept: text/html" https://x.io', 'ssh -p 22 host', 'cp -pr src dst', 'mkdir -pv a/b', 'ls -pa', 'lsof -p1234', 'pytest -pno:cacheprovider', 'ssh -p22 host', 'docker run -p3000:3000 img'])assert.equal(maskSecrets(plain), plain);
+  for (const plain of ['serve -p 8080', 'docker run -p 3000:3000 img', 'find . -print', 'mysql -u root app', 'curl -H "Accept: text/html" https://x.io', 'ssh -p 22 host', 'cp -pr src dst', 'sudo cp -pr a b','mkdir -pv a/b', 'ls -pa', 'lsof -p1234', 'pytest -pno:cacheprovider', 'ssh -p22 host', 'docker run -p3000:3000 img'])assert.equal(maskSecrets(plain), plain);
   check('leaves port flags and ordinary headers alone');
 
   for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/agent-deck/node_modules']) assert.equal(maskSecrets(plain), plain);
