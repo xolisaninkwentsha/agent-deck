@@ -746,6 +746,13 @@ function render() {
   const needs = items.filter((x) => x.s.pending || x.s.status === 'approval' || x.s.status === 'question').length
     + agentItems.filter(({ a }) => a.status === 'waiting' || a.status === 'error' || a.status === 'not_responding').length;
 
+  // The tray's Bolt: needs you > something failed > working > asleep.
+  const needsYou = items.some(({ s }) => s.pending || s.status === 'approval' || s.status === 'question') || agentItems.some(({ a }) => a.status === 'waiting');
+  const failed = items.some(({ s }) => s.status === 'error') || agentItems.some(({ a }) => a.status === 'error' || a.status === 'not_responding');
+  const busy = active.some(({ s }) => s.status === 'working' || s.status === 'background') || agentItems.some(({ a }) => a.status === 'working');
+  const tray = needsYou ? 'needs' : failed ? 'error' : busy ? 'working' : 'idle';
+  if (tray !== state.trayState) { state.trayState = tray; window.deck.trayState(tray); }
+
   document.getElementById('count').textContent = active.length ? String(active.length) : '';
   const live = document.getElementById('live-dot');
   live.className = 'live-dot' + (needs ? ' needs' : active.some((x) => x.s.status === 'working') ? ' busy' : '');

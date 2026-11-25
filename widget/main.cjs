@@ -76,10 +76,17 @@ function setApprovals(enabled, fromTray) {
   updateTray();
 }
 
+// The tray shows Bolt in the overall state of your sessions (the panel reports it): asleep, working,
+// "?" when something needs you, X eyes on an error. Images from icons/make-icons.cjs.
+const TRAY_STATES = ['idle', 'working', 'needs', 'error'];
+const TRAY_TIPS = { idle: 'Agent Deck', working: 'Agent Deck: working', needs: 'Agent Deck: needs you', error: 'Agent Deck: something failed' };
+const trayImages = {};
+const trayImage = (st) => (trayImages[st] ||= nativeImage.createFromPath(path.join(__dirname, 'icons', `tray-${st}.png`)).resize({ width: 22, height: 22 }));
+let trayState = 'idle';
 function createTray() {
   try {
-    tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'icon.png')).resize({ width: 22, height: 22 }));
-    tray.setToolTip('Agent Deck');
+    tray = new Tray(trayImage(trayState));
+    tray.setToolTip(TRAY_TIPS[trayState]);
     tray.on('click', togglePanel); // where the desktop supports clicks; the menu works everywhere
     updateTray();
   } catch (e) {
@@ -278,6 +285,13 @@ ipcMain.on('save-settings', (_e, patch) => {
 });
 
 ipcMain.handle('config', () => rendererConfig());
+
+ipcMain.on('tray-state', (_e, st) => {
+  if (!TRAY_STATES.includes(st) || st === trayState) return;
+  trayState = st;
+  if (tray) { tray.setImage(trayImage(st)); tray.setToolTip(TRAY_TIPS[st]); }
+  console.log(`[agent-deck] tray: ${st}`);
+});
 
 // Other machines, from the settings view. config.addHub validates (same as "agent-deck add-hub").
 const configChanged = () => { if (win && !win.isDestroyed()) win.webContents.send('config-changed', rendererConfig()); };
