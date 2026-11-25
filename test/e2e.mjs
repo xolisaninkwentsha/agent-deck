@@ -329,6 +329,28 @@ async function main() {
   assert.equal(cs().context.window, 1000000);
   ok('context meter: more than 200K in use means the window is bigger (1M)');
 
+  // 9k2. Model, tokens and tools on the card, from a running read of the transcript.
+  const USE = path.join(HOME, 'usage.jsonl');
+  const asst = (id, { model = 'claude-opus-5-5', inTok = 0, out = 0, tools = [], sidechain = false } = {}) => JSON.stringify({
+    type: 'assistant', isSidechain: sidechain,
+    message: { id, role: 'assistant', model, content: tools.map(([tid, name]) => ({ type: 'tool_use', id: tid, name, input: {} })),
+      usage: { input_tokens: inTok, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: out } },
+  }) + '\n';
+  fs.writeFileSync(USE,
+    asst('m1', { inTok: 1000, out: 10, tools: [['t1', 'Bash']] })
+    + asst('m1', { inTok: 1000, out: 40, tools: [['t2', 'Read']] }) // the same message, further along: adds 30 out, not 1040
+    + asst('m2', { inTok: 2000, out: 5, tools: [['t3', 'Bash']] })
+    + asst('m2', { inTok: 2000, out: 5, tools: [['t3', 'Bash']] }) // an exact repeat adds nothing
+    + asst('s1', { inTok: 99999, out: 999, tools: [['t9', 'Edit']], sidechain: true })); // a subagent's, not this session's
+  await hook('observe', { session_id: 'sess-use', cwd: '/work/use', transcript_path: USE, hook_event_name: 'SessionStart', source: 'startup' });
+  const us = () => snap.sessions.find((x) => x.id === 'sess-use');
+  await until(() => us()?.usage?.tokensIn === 3000, 'usage read from the transcript', 60);
+  assert.deepEqual(us().usage, { model: 'claude-opus-5-5', tokensIn: 3000, tokensOut: 45, tools: [['Bash', 2], ['Read', 1]] });
+  fs.appendFileSync(USE, asst('m3', { model: 'claude-sonnet-5-5', inTok: 500, out: 20, tools: [['t4', 'Edit'], ['t5', 'Edit'], ['t6', 'Edit']] }));
+  await until(() => us()?.usage?.tokensOut === 65, 'picks up where it left off', 60);
+  assert.deepEqual(us().usage, { model: 'claude-sonnet-5-5', tokensIn: 3500, tokensOut: 65, tools: [['Edit', 3], ['Bash', 2], ['Read', 1]] });
+  ok('card usage: model, tokens in/out and tool counts from the transcript, each message and call once, subagents left out');
+
   // 9l. The panel's settings change holdSeconds in config.json; the daemon picks it up live.
   const cfgFile = path.join(HOME, 'config.json');
   const setHold = (n) => fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8')), holdSeconds: n }));

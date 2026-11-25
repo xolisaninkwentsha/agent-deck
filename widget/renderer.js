@@ -6,13 +6,21 @@ const STATUS_LABEL = {
   background: 'Background work', idle: 'Your turn', error: 'Error', ended: 'Ended',
 };
 const STATUS_ORDER = { approval: 0, question: 0, error: 1, working: 2, background: 3, idle: 4, ended: 5 };
-const AVATAR_COLORS = ['#4f7cff', '#ff6fa8', '#ff9f43', '#a678ff', '#2ec4b6', '#ffd23f', '#5ad1ff', '#ff7a6b'];
 const ICONS = {
   shieldOn: '<svg viewBox="0 0 16 16"><path d="M8 1.5 2.5 3.5v4c0 3.3 2.3 5.9 5.5 7 3.2-1.1 5.5-3.7 5.5-7v-4z" fill="currentColor"/></svg>',
   shieldOff: '<svg viewBox="0 0 16 16"><path d="M8 1.5 2.5 3.5v4c0 3.3 2.3 5.9 5.5 7 3.2-1.1 5.5-3.7 5.5-7v-4z" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>',
   up: '<svg viewBox="0 0 16 16"><path d="M3.5 10 8 5.5 12.5 10" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
   down: '<svg viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6"/></svg>',
+  // tools, on the line under each session
+  edit: '<svg viewBox="0 0 12 12"><path d="M2 10l.6-2.4L8.3 1.9l1.8 1.8L4.4 9.4z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>',
+  bash: '<svg viewBox="0 0 12 12"><path d="M2 3l3 3-3 3M6.5 9.5H10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>',
+  read: '<svg viewBox="0 0 12 12"><path d="M3 1.5h4l2.5 2.5v6.5H3z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><path d="M4.5 6h3M4.5 8h3" stroke="currentColor" stroke-width="1"/></svg>',
+  search: '<svg viewBox="0 0 12 12"><circle cx="5" cy="5" r="3" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7.3 7.3 10 10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  web: '<svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.3" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.8 6h8.4M6 1.7c-2 2.4-2 6.2 0 8.6M6 1.7c2 2.4 2 6.2 0 8.6" fill="none" stroke="currentColor" stroke-width="1"/></svg>',
+  agent: '<svg viewBox="0 0 12 12"><circle cx="4" cy="4.2" r="1.8" fill="none" stroke="currentColor" stroke-width="1.1"/><circle cx="8.6" cy="5" r="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.2 10c.4-2 1.5-3 2.8-3s2.4 1 2.8 3M7 9.8c.3-1.4 1-2.1 1.8-2.1s1.6.7 1.9 2.1" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>',
+  plug: '<svg viewBox="0 0 12 12"><path d="M4 1.5v2.5M8 1.5v2.5M3 4h6v2.2a3 3 0 0 1-6 0zM6 9.2v1.8" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>',
+  dot: '<svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="2" fill="currentColor"/></svg>',
   jump: '<svg viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 5 11M3 6v7h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   // A cog with teeth (the old one, a circle with rays, read as a brightness control).
   gear: '<svg viewBox="0 0 16 16"><path d="M6.9 1.5h2.2l.4 1.9 1.3.6 1.6-1.1 1.6 1.6-1.1 1.6.6 1.3 1.9.4v2.2l-1.9.4-.6 1.3 1.1 1.6-1.6 1.6-1.6-1.1-1.3.6-.4 1.9H6.9l-.4-1.9-1.3-.6-1.6 1.1-1.6-1.6 1.1-1.6-.6-1.3-1.9-.4V6.9l1.9-.4.6-1.3-1.1-1.6 1.6-1.6 1.6 1.1 1.3-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>',
@@ -246,6 +254,7 @@ function h(tag, props, ...children) {
       else if (k === 'text') el.textContent = v;
       else if (k === 'html') el.innerHTML = v; // only used with our own constant ICONS
       else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else if (k === 'style' && typeof v === 'string') el.setAttribute('style', v); // custom properties
       else if (k === 'style') Object.assign(el.style, v);
       else el.setAttribute(k, v);
     }
@@ -253,7 +262,6 @@ function h(tag, props, ...children) {
   for (const c of children.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   return el;
 }
-const colorFor = (key) => { let x = 0; for (const ch of key) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return AVATAR_COLORS[x % AVATAR_COLORS.length]; };
 const ago = (ts) => {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
   if (s < 60) return `${s}s`; if (s < 3600) return `${Math.round(s / 60)}m`; return `${Math.round(s / 3600)}h`;
@@ -398,9 +406,62 @@ function allSessions() {
   return out;
 }
 
-function avatar(s) {
-  return h('div', { class: `avatar st-${s.status}`, style: { background: colorFor(s.key) } },
-    h('span', { class: 'eye l' }), h('span', { class: 'eye r' }), h('span', { class: 'mouth' }));
+// Bolt, the robot on every card. His state follows the session's; each session gets its own head
+// tint so cards stay easy to tell apart. (Our own constant markup; nothing from a session goes in.)
+const BOLT_SVG = `<svg viewBox="0 0 64 64" class="bolt" aria-hidden="true">
+  <g class="fx-z"><text x="47" y="15">z</text><text x="53" y="9">z</text></g>
+  <g class="smoke"><circle cx="45" cy="11" r="3"/><circle cx="49" cy="6.5" r="2.2"/><circle cx="52" cy="3" r="1.6"/></g>
+  <line class="stalk" x1="32" y1="9" x2="32" y2="15"/><circle class="bulb" cx="32" cy="7" r="3.2"/>
+  <rect class="bolt-ear" x="12.5" y="23" width="4" height="8" rx="1.5"/><rect class="bolt-ear" x="47.5" y="23" width="4" height="8" rx="1.5"/>
+  <rect class="headbox" x="16" y="14" width="32" height="25" rx="8"/><rect class="screen" x="20" y="18.5" width="24" height="16" rx="4.5"/>
+  <g class="eyes-open"><rect x="24.5" y="22.5" width="4.5" height="7" rx="2"/><rect x="35" y="22.5" width="4.5" height="7" rx="2"/></g>
+  <g class="eyes-shut"><rect x="24" y="26" width="5.5" height="1.8" rx=".9"/><rect x="34.5" y="26" width="5.5" height="1.8" rx=".9"/></g>
+  <text class="eyes-q" x="32" y="31">?</text>
+  <g class="eyes-x"><path d="M24.5 23l5 5m0-5l-5 5M34.5 23l5 5m0-5l-5 5"/></g>
+  <rect class="neck" x="28" y="39" width="8" height="3" rx="1"/><rect class="torso" x="19" y="42" width="26" height="18" rx="6"/>
+  <g class="gear"><circle cx="32" cy="51" r="5"/><circle cx="32" cy="51" r="2"/></g>
+  <path class="arm" d="M19 47q-6 3-6 9"/><g class="arm-right"><path class="arm" d="M45 47q6 3 6 9"/></g>
+  <g class="wave"><path class="arm" d="M45 47q7-3 8-11"/><circle class="hand" cx="53" cy="35" r="2.6"/></g>
+</svg>`;
+const BOLT_TINTS = ['#c9d3e2', '#b9def2', '#c4e5d2', '#dcd0f2', '#f0d9bb', '#efc8d3', '#d3dfa6', '#bccdf5'];
+const boltTint = (key) => { let x = 0; for (const ch of key) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return BOLT_TINTS[x % BOLT_TINTS.length]; };
+const SESSION_BOLT = { working: 'working', background: 'working', approval: 'needs', question: 'needs', error: 'error', idle: 'idle', ended: 'idle' };
+const AGENT_BOLT = { working: 'working', waiting: 'needs', error: 'error', not_responding: 'error', idle: 'idle' };
+const boltAvatar = (key, st) => h('div', { class: 'avatar' }, h('div', { class: 'm', 'data-s': st, style: `--tint:${boltTint(key)}`, html: BOLT_SVG }));
+const avatar = (s) => boltAvatar(s.key, SESSION_BOLT[s.status] || 'idle');
+
+// The line under a session: model, context, tokens this session, and its most-used tools.
+function shortModel(id) {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?/.exec(String(id || ''));
+  if (!m) return String(id || '').slice(0, 18);
+  return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? '.' + m[3] : ''}${/\[1m\]/i.test(id) ? ' 1M' : ''}`;
+}
+const shortTool = (name) => (name.startsWith('mcp__') ? name.split('__').pop() : name === 'AskUserQuestion' ? 'Ask' : name).slice(0, 14);
+function toolIcon(name) {
+  if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name)) return ICONS.edit;
+  if (/^(Bash|BashOutput|KillShell)$/.test(name)) return ICONS.bash;
+  if (name === 'Read') return ICONS.read;
+  if (/^(Grep|Glob|ToolSearch)$/.test(name)) return ICONS.search;
+  if (/^Web/.test(name)) return ICONS.web;
+  if (/^(Task|Agent)$/.test(name)) return ICONS.agent;
+  if (name.startsWith('mcp__')) return ICONS.plug;
+  return ICONS.dot;
+}
+const count = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${+(n / 1000).toFixed(n < 10000 ? 1 : 0)}k` : String(n));
+function infoLine(s) {
+  const u = s.usage, c = s.status === 'ended' ? null : s.context;
+  const model = shortModel(u?.model || s.context?.model || '');
+  const tools = (u?.tools || []).slice(0, 3);
+  if (!model && !c && !tools.length) return null;
+  return h('div', { class: 'info' },
+    model ? h('span', { class: 'model', title: u?.model || s.context?.model, text: model }) : null,
+    contextMeter(c),
+    u && (u.tokensIn || u.tokensOut) ? h('span', {
+      title: `This session: ${u.tokensIn.toLocaleString()} tokens in (including cache reads), ${u.tokensOut.toLocaleString()} out`,
+      text: `${count(u.tokensIn)} in · ${count(u.tokensOut)} out`,
+    }) : null,
+    tools.length ? h('span', { class: 'tools' }, tools.map(([name, n]) => h('span', { class: 'tool', title: `${name}: ${n} calls` },
+      h('span', { class: 'ti', html: toolIcon(name) }), `${shortTool(name)} ${n}`))) : null);
 }
 
 const tokens = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`);
@@ -419,12 +480,11 @@ function contextMeter(c) {
 function progressRow(s) {
   const p = s.progress;
   const label = h('span', { class: `status st-${s.status}`, text: STATUS_LABEL[s.status] || s.status });
-  const ctx = s.status === 'ended' ? null : contextMeter(s.context);
-  if (!p || !p.total) return h('div', { class: 'meta' }, label, s.background.length ? h('span', { class: 'bg-count', text: `${s.background.length} in background` }) : null, ctx);
+  if (!p || !p.total) return h('div', { class: 'meta' }, label, s.background.length ? h('span', { class: 'bg-count', text: `${s.background.length} in background` }) : null);
   const pct = Math.round((p.done / p.total) * 100);
   return h('div', { class: 'meta' },
     h('span', { class: 'frac', text: `${p.done}/${p.total}` }), label,
-    h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })), ctx);
+    h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })));
 }
 
 // A plan (or other markdown) as readable text: headings, lists, paragraphs, **bold** and `code`.
@@ -580,6 +640,7 @@ function card({ hub, s }) {
         h('div', { class: 'side-btns' },
           hub.local && s.canJump ? h('button', { class: 'icon small', title: 'Jump to this session', html: ICONS.jump, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'jump', key: s.key }); } }) : null,
           h('button', { class: 'icon small', title: 'Hide this card', html: ICONS.close, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'dismiss', key: s.key }); } })))),
+    infoLine(s),
     s.pending && s.pending.kind === 'question' ? questionBox(hub, s, s.pending) : null,
     s.pending && s.pending.kind !== 'question' ? approvalBox(hub, s, s.pending) : null,
     open ? details(s) : null);
@@ -659,7 +720,7 @@ function agentCard({ hub, a }) {
     onclick: () => { open ? state.expanded.delete(a.key) : state.expanded.add(a.key); render(); },
   },
     h('div', { class: 'row' },
-      h('div', { class: `avatar bot ag-${a.status}`, style: { background: colorFor(a.key) } }, h('span', { class: 'eye l' }), h('span', { class: 'eye r' }), h('span', { class: 'mouth' })),
+      boltAvatar(a.key, AGENT_BOLT[a.status] || 'idle'),
       h('div', { class: 'body' },
         h('div', { class: 'name', title: a.displayName, text: a.displayName }),
         h('div', { class: 'step', title: agentLine(a), text: agentLine(a) }),

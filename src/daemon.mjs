@@ -16,7 +16,7 @@ import { ownDevice, plainIp } from './tailscale.mjs';
 import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
-import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
+import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow, scanUsage, usageSummary } from './claude-sessions.mjs';
 import {
   newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs,
   otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick, wakeClock,
@@ -314,11 +314,20 @@ const WATCH_STEP = {
 
 // Read the end of a session's transcript if it grew since last time, and update the context
 // meter from it. Returns the tail text (for the caller to use too), or null if nothing changed.
+const usageAcc = new Map(); // session key -> running transcript totals (scanUsage); memory only
 function refreshTranscript(s, now) {
   const file = s.transcript || (s.source === 'discovered' ? (s.transcript = transcriptFor(s.id, s.cwd)) : null);
   if (!file) return null;
   let size;
   try { size = fs.statSync(file).size; } catch { return null; }
+  // Model, tokens and tools for the card: catch up with what was written since last time.
+  const acc = usageAcc.get(s.key);
+  if (!acc || acc.offset < size) {
+    const next = scanUsage(file, acc);
+    usageAcc.set(s.key, next);
+    const sum = usageSummary(next);
+    if (JSON.stringify(sum) !== JSON.stringify(s.usage)) s.usage = sum;
+  }
   if (size === s.transcriptSize) return null;
   s.transcriptSize = size;
   const tail = readTail(file, 262144); // large: api-request-blob entries can push usage out of a small tail
@@ -651,10 +660,10 @@ setInterval(() => {
   const tails = new Map();
   for (const s of sessions.values()) {
     if (s.ended) continue;
-    const before = s.context?.used;
+    const before = s.context?.used, usageBefore = s.usage;
     const tail = refreshTranscript(s, now);
     if (tail !== null) tails.set(s.key, tail);
-    if (s.context?.used !== before) changed = true;
+    if (s.context?.used !== before || s.usage !== usageBefore) changed = true;
   }
   try { changed = syncFromClaude(now, tails) || changed; } catch (e) { log('reading ~/.claude/sessions failed: ' + e.message); }
   for (const s of sessions.values()) {
@@ -668,6 +677,7 @@ setInterval(() => {
     else if (!s.ended && now - s.lastAt > 12 * 3600 * 1000 && !s.pid) { sessions.delete(s.key); changed = true; }
   }
   for (const [fp, t] of releasedQuestions) if (now - t > 300000) releasedQuestions.delete(fp);
+  for (const key of usageAcc.keys()) if (!sessions.has(key)) usageAcc.delete(key);
   // Agents whose heartbeat stopped turn "not responding" with no event to tell us: check here.
   for (const a of [...agents.values()]) {
     if (now - (a.lastSeen || 0) > AGENT_FORGET_MS) { agents.delete(a.key); changed = true; continue; }
