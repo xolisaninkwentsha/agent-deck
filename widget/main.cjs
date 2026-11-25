@@ -9,7 +9,14 @@ const { pathToFileURL } = require('node:url');
 if (process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND) {
   app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
-if (process.env.AGENT_DECK_NO_GPU) app.disableHardwareAcceleration();
+// A small panel doesn't need the GPU, and on Ubuntu the GPU process often can't load
+// the Mesa driver from inside Chromium's sandbox, which leaves the window blank or
+// invisible. Software rendering is the safe default on Linux (AGENT_DECK_GPU=1 to opt in).
+if (process.env.AGENT_DECK_NO_GPU || (process.platform === 'linux' && !process.env.AGENT_DECK_GPU)) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+}
 
 const WIDTH = 360;
 let win = null;
