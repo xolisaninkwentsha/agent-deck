@@ -77,6 +77,10 @@ The trade-off: while the shield is on, a prompt shows up in the panel *first*. I
 
 ## Ubuntu notes
 
+- On Ubuntu 23.10+ run this once after `npm install` (Ubuntu blocks Electron's usual sandbox; `agent-deck widget` reminds you if needed):
+  `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox`
+- The panel draws without the GPU sandbox on Linux, because the GPU process crashes on recent Ubuntu and leaves the window invisible. `AGENT_DECK_GPU=1` restores Electron's defaults. If the panel ever doesn't appear, `bash test/try-display.sh` tries the alternatives.
+
 - Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this. If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `AGENT_DECK_WAYLAND=1` to try native Wayland.
 - "Jump to session" switches tmux panes and focuses VS Code. For other terminals on Linux it can't raise the window yet.
 

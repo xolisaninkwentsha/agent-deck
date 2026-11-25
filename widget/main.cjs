@@ -9,6 +9,13 @@ const { pathToFileURL } = require('node:url');
 if (process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND) {
   app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
+// On Ubuntu 24.04+ the separate GPU process crashes inside its sandbox (Mesa can't open
+// dri_gbm.so), and then the window is never drawn, so it never appears. Running the
+// GPU work inside the main process avoids that; the renderer sandbox stays on.
+if (process.platform === 'linux' && !process.env.AGENT_DECK_GPU) {
+  app.commandLine.appendSwitch('disable-gpu-sandbox');
+  app.commandLine.appendSwitch('in-process-gpu');
+}
 // A small panel doesn't need the GPU, and on Ubuntu the GPU process often can't load
 // the Mesa driver from inside Chromium's sandbox, which leaves the window blank or
 // invisible. Software rendering is the safe default on Linux (AGENT_DECK_GPU=1 to opt in).
