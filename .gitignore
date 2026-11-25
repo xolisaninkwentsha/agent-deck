@@ -3,3 +3,4 @@ node_modules/
 agent-deck.gitbundle
 test/live/.work/
 test/live/.pylib/
+__pycache__/

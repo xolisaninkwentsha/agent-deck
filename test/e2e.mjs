@@ -402,7 +402,7 @@ async function main() {
   const CLIENT_DIR = path.join(ROOT, 'clients', 'python');
   const py = (code, port) => new Promise((resolve) => {
     const t = Date.now();
-    const p = spawn('python3', ['-I', '-c', `import sys; sys.path.insert(0, ${JSON.stringify(CLIENT_DIR)})\n${code}`], { env: { ...env, AGENT_DECK_PORT: String(port) } });
+    const p = spawn('python3', ['-I', '-B', '-c', `import sys; sys.path.insert(0, ${JSON.stringify(CLIENT_DIR)})\n${code}`], { env: { ...env, AGENT_DECK_PORT: String(port) } });
     let out = '', err = '';
     p.stdout.on('data', (c) => { out += c; });
     p.stderr.on('data', (c) => { err += c; });
