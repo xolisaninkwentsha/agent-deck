@@ -38,3 +38,14 @@ body.activity { border: 0; border-radius: 0; display: flex; flex-direction: colu
 .o-detail .meta-line .model { color: var(--text); background: var(--plate); border-radius: 4px; padding: 0 5px; font-weight: 600; }
 .k-stop { --k: var(--stopped); }
 .o-detail .d-sec .d-head { color: color-mix(in srgb, var(--k, var(--muted)) 70%, var(--text)); }
+
+/* the session's plan, above the outline */
+.a-plan { background: var(--card); border: 1px solid var(--card-line, var(--line)); border-radius: 12px; padding: 8px 10px; margin-bottom: 8px; display: grid; gap: 6px; font-size: 11.5px; min-width: 0; }
+.a-plan-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.a-plan-head .d-head { margin: 0; }
+.a-plan-count { font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; }
+.a-plan-head .bar { flex: 1; }
+.a-plan-head .spacer { flex: 1; }
+.a-fold { color: var(--muted); font-size: 11px; }
+.a-doc { display: grid; gap: 4px; }
+.a-doc .more { justify-self: start; }

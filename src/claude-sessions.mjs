@@ -92,7 +92,52 @@ export function contextUsage(tail) {
 // tokens in (input, cache writes and reads) and out, the latest model, and calls per tool.
 // Main thread only. One API response can span several lines with the same message id (one per
 // content block), so a message adds only what it hasn't added yet, and a tool call counts once.
-export const newUsage = () => ({ offset: 0, input: 0, output: 0, model: '', tools: {}, msgs: new Map(), toolIds: new Set() });
+export const newUsage = () => ({ offset: 0, input: 0, output: 0, model: '', tools: {}, msgs: new Map(), toolIds: new Set(), plan: newPlan() });
+
+// The session's plan, for the activity window: its task list (TaskCreate/TaskUpdate, or the older
+// TodoWrite list) and the latest plan document (ExitPlanMode), approved, rejected or still proposed.
+const newPlan = () => ({ tasks: new Map(), todos: null, doc: null });
+const clip = (v, n) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+function planFromCall(plan, c, ts) {
+  const input = c.input || {};
+  if (c.name === 'TodoWrite' && Array.isArray(input.todos)) {
+    plan.todos = input.todos.slice(0, 60).map((t) => ({ text: clip(t.status === 'in_progress' ? t.activeForm || t.content : t.content, 160), status: String(t.status || 'pending') }));
+  } else if (c.name === 'TaskUpdate') {
+    const t = plan.tasks.get(String(input.taskId ?? ''));
+    if (!t) return;
+    if (input.status === 'deleted') plan.tasks.delete(t.id);
+    else { if (input.status) t.status = String(input.status); if (input.subject) t.subject = clip(input.subject, 160); }
+  } else if (c.name === 'ExitPlanMode') {
+    plan.doc = { toolId: c.id, text: String(input.plan || '').slice(0, 20000), state: 'proposed', at: ts };
+  }
+}
+// What came back: a created task's id, or the plan's answer (its text comes back when approved).
+function planFromResult(plan, e, ts) {
+  const r = e.toolUseResult;
+  if (r && r.task && r.task.id != null) {
+    const id = String(r.task.id);
+    plan.tasks.set(id, { id, subject: clip(r.task.subject, 160), status: 'pending' });
+    if (plan.tasks.size > 100) plan.tasks.delete(plan.tasks.keys().next().value);
+  }
+  if (r && typeof r.plan === 'string' && r.plan) {
+    plan.doc = { ...(plan.doc || { toolId: '', at: ts }), text: r.plan.slice(0, 20000), state: 'approved' };
+  }
+  const doc = plan.doc;
+  if (doc && doc.state === 'proposed' && Array.isArray(e.message?.content)) {
+    for (const c of e.message.content) {
+      if (c?.type !== 'tool_result' || c.tool_use_id !== doc.toolId) continue;
+      const out = typeof c.content === 'string' ? c.content : JSON.stringify(c.content || '');
+      doc.state = c.is_error || /doesn't want to proceed|rejected/i.test(out) ? 'rejected' : 'approved';
+    }
+  }
+}
+// For the activity window.
+export const planOf = (acc) => {
+  const p = acc?.plan;
+  if (!p) return null;
+  const tasks = p.tasks.size ? [...p.tasks.values()].map((t) => ({ text: t.subject, status: t.status })) : p.todos || [];
+  return tasks.length || p.doc ? { tasks, doc: p.doc ? { text: p.doc.text, state: p.doc.state, at: p.doc.at } : null } : null;
+};
 export function scanUsage(file, acc = newUsage()) {
   let fd;
   try { fd = fs.openSync(file, 'r'); } catch { return acc; }
@@ -107,9 +152,12 @@ export function scanUsage(file, acc = newUsage()) {
     if (end < 0) return acc;
     acc.offset += end + 1;
     for (const line of buf.subarray(0, end).toString('utf8').split('\n')) {
-      if (!line.includes('"assistant"')) continue;
+      // Assistant lines carry usage and tool calls; user lines with a tool result feed the plan.
+      const result = line.includes('"toolUseResult"') || (acc.plan.doc?.toolId && line.includes(acc.plan.doc.toolId));
+      if (!line.includes('"assistant"') && !result) continue;
       let e;
       try { e = JSON.parse(line); } catch { continue; }
+      if (e.type === 'user' && !e.isSidechain) { planFromResult(acc.plan, e, Date.parse(e.timestamp) || 0); continue; }
       const msg = e.type === 'assistant' && !e.isSidechain ? e.message : null;
       if (!msg) continue;
       if (msg.model && msg.model !== '<synthetic>') acc.model = String(msg.model);
@@ -118,6 +166,7 @@ export function scanUsage(file, acc = newUsage()) {
         acc.toolIds.add(c.id);
         const name = String(c.name || 'tool').slice(0, 60);
         acc.tools[name] = (acc.tools[name] || 0) + 1;
+        planFromCall(acc.plan, c, Date.parse(e.timestamp) || 0);
       }
       const u = msg.usage, id = msg.id || e.uuid;
       if (u && id) {

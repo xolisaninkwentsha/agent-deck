@@ -53,3 +53,36 @@ function shortModel(id) {
 }
 
 const count = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${+(n / 1000).toFixed(n < 10000 ? 1 : 0)}k` : String(n));
+
+// A plan (or other markdown) as readable text: headings, lists, paragraphs, **bold** and `code`.
+// Every piece goes in as text, never as HTML.
+function inlineMd(text) {
+  const out = [], re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(m[0].startsWith('**') ? h('strong', { text: m[0].slice(2, -2) }) : h('code', { text: m[0].slice(1, -1) }));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function planDoc(md) {
+  const blocks = [];
+  let list = null;
+  for (const raw of String(md).split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (item) {
+      const ordered = /^\s*\d/.test(line);
+      if (!list || list.ordered !== ordered) { list = { el: h(ordered ? 'ol' : 'ul', null), ordered }; blocks.push(list.el); }
+      list.el.append(h('li', null, inlineMd(item[1])));
+      continue;
+    }
+    list = null;
+    if (!line.trim() || /^```/.test(line)) continue;
+    const head = /^#{1,6}\s+(.*)$/.exec(line);
+    blocks.push(head ? h('h4', null, inlineMd(head[1])) : h('p', null, inlineMd(line)));
+  }
+  return blocks;
+}

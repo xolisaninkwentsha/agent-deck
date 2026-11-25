@@ -17,7 +17,7 @@ import { subagentsDir, scanActivity } from './subagents.mjs';
 import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
-import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow, scanUsage, usageSummary } from './claude-sessions.mjs';
+import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow, scanUsage, usageSummary, planOf } from './claude-sessions.mjs';
 import {
   newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs,
   otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick, wakeClock,
@@ -156,6 +156,7 @@ function activityFor(s, now = Date.now()) {
       model: u.model || s.context?.model || '', tokensIn: u.tokensIn || 0, tokensOut: u.tokensOut || 0,
       toolCount: u.toolCount || 0, topTools: (u.tools || []).slice(0, 3),
       steps: s.steps.slice(-8).reverse().map((x) => ({ ts: x.ts, text: x.text })), lastText: s.lastMessage || '', startedAt: s.startedAt,
+      plan: planOf(usageAcc.get(s.key)), // its task list and latest plan document, from the transcript
     },
     agents,
   };

@@ -3,7 +3,7 @@
 // and redraws on every {type:'activity'} it gets back. Text goes in with textContent only.
 'use strict';
 
-const ui = { params: null, ws: null, connected: false, data: null, sel: null, runningOnly: false, retry: 0, timer: null };
+const ui = { params: null, ws: null, connected: false, data: null, sel: null, runningOnly: false, retry: 0, timer: null, planOpen: true, docOpen: false };
 
 // Bolt's state for a subagent, and for the main session (whose status is a session status).
 const AGENT_BOLT = { running: 'working', done: 'idle', stopped: 'stop' };
@@ -117,6 +117,26 @@ function detail(a) {
   if (a.lastText) parts.push(h('div', { class: 'd-sec k-msg' }, h('div', { class: 'd-head', text: a.status === 'running' ? 'Latest message' : 'Last reply' }), h('div', { class: 'last-msg', text: a.lastText })));
   return h('div', { class: 'o-detail', onclick: (e) => e.stopPropagation() }, parts);
 }
+// The session's plan: its task list ticked off as it goes, and the latest plan document (folded).
+const TASK_STATE = { completed: 'done', in_progress: 'now' };
+function planSection(plan) {
+  if (!plan) return null;
+  const tasks = plan.tasks || [], done = tasks.filter((t) => t.status === 'completed').length;
+  const head = h('div', { class: 'a-plan-head', onclick: () => { ui.planOpen = !ui.planOpen; render(); } },
+    h('span', { class: 'd-head', text: 'Plan' }),
+    tasks.length ? h('span', { class: 'a-plan-count', text: `${done} of ${tasks.length} done` }) : null,
+    tasks.length ? h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: `${Math.round((done / tasks.length) * 100)}%` } })) : h('span', { class: 'spacer' }),
+    h('span', { class: 'a-fold', text: ui.planOpen ? '▾' : '▸' }));
+  if (!ui.planOpen) return h('section', { class: 'a-plan' }, head);
+  const doc = plan.doc;
+  const docLabel = doc ? `${{ approved: 'Approved', rejected: 'Rejected', proposed: 'Proposed' }[doc.state] || 'Plan'}${doc.at ? ` ${ago(doc.at)} ago` : ''}` : '';
+  return h('section', { class: 'a-plan' }, head,
+    tasks.length ? h('div', { class: 'timeline' }, tasks.map((t) => h('div', { class: `d-row t-step ${TASK_STATE[t.status] || ''}`, title: t.status.replace('_', ' ') },
+      h('span', { class: 't-dot' }), h('span', { class: 'd-text', text: t.text })))) : null,
+    doc && doc.text ? h('div', { class: 'a-doc' },
+      h('button', { class: 'more', text: `${ui.docOpen ? 'Hide' : 'Show'} the plan document · ${docLabel}`, onclick: () => { ui.docOpen = !ui.docOpen; render(); } }),
+      ui.docOpen ? h('div', { class: 'plan-doc full' }, planDoc(doc.text)) : null) : null);
+}
 function select(id) { ui.sel = ui.sel === id ? null : id; render(); }
 const keySelect = (id) => (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(id); } };
 
@@ -134,7 +154,7 @@ function render() {
   counts.replaceChildren(...[h('span', { class: 'c-run', text: `${n('running')} running` }), h('span', { class: 'c-done', text: `${n('done')} done` }),
     n('stopped') ? h('span', { class: 'c-stop', text: `${n('stopped')} stopped` }) : null].filter(Boolean)); // replaceChildren would print "null"
   const list = rows(d);
-  const out = [];
+  const out = [planSection(d.main.plan)];
   for (const row of list) out.push(...(row.main ? mainRow(d, row) : agentRow(row.a, row)));
   if (!d.agents.length) out.push(h('div', { class: 'a-empty', text: 'No subagents in this session yet. They appear here as soon as one starts.' }));
   else if (ui.runningOnly && list.length === 1) out.push(h('div', { class: 'a-empty', text: 'Nothing running right now.' }));
