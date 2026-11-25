@@ -4,6 +4,7 @@ import { verifySignature, parseWebhook, promptMessage, textMessage, templateMess
 import { MemoryStore } from '../relay/src/memory-store.js';
 import { CODE_ALPHABET, newCode, findCode, newRef, sha256Hex, normalizeNumber, maskNumber } from '../relay/src/ids.js';
 import { priceFor, reserve, release } from '../relay/src/credit.js';
+import { createRelay } from '../relay/src/core.js';
 
 let passed = 0;
 const check = (name) => { passed++; console.log(`  ✓ ${name}`); };
@@ -237,6 +238,137 @@ async function main() {
   assert.equal(reserve(zero, 0, 2, 2).ok, true);
   assert.deepEqual(reserve(zero, 0, 3, 2), { ok: false, reason: 'rate-limited' });
   check('priceFor, reserve and release');
+
+  // relay core: linking and status
+  {
+    const config = { botNumber: '27600000000', billing: 'trial', trialMicroUsd: 100000, rates: { default: 10000 }, markupPercent: 20, hourlyCap: 60, codeTtlMs: 600000, windowMs: 86400000, template: { name: 't', lang: 'en' } };
+    const price = priceFor('27821234567', config);
+    const setup = () => {
+      const store = new MemoryStore();
+      const sent = [];
+      const sender = { send: async (p) => { sent.push(p); return { ok: true, id: 'w' + sent.length }; } };
+      const clock = { t: 1700000000000 };
+      const relay = createRelay({ store, sender, config, now: () => clock.t });
+      return { store, sent, clock, relay };
+    };
+    const inbound = (id, from, text, ts) => ({ inbound: [{ id, from, text, ts }], statuses: [] });
+    const KH = 'kh1';
+
+    // hello + link-start + link
+    let { store, sent, clock, relay } = setup();
+    let r = await relay.hello(KH, { machine: 'laptop', version: '1' });
+    assert.deepEqual(r, [{ type: 'status', linked: false, number: null, balanceMicroUsd: null, billing: 'trial', botNumber: '27600000000' }]);
+    r = await relay.machineMessage(KH, { type: 'link-start', number: '+27 82 123 4567' });
+    assert.equal(r.length, 1);
+    assert.equal(r[0].type, 'link-code');
+    assert.equal(r[0].botNumber, '27600000000');
+    assert.equal(r[0].expiresAt, clock.t + 600000);
+    assert.equal(sent.length, 0);
+    const code = r[0].code;
+    check('link-start returns a code and sends nothing');
+
+    clock.t += 1000;
+    const ts = clock.t;
+    let routes = await relay.webhook(inbound('m1', '27821234567', `my code is ${code.slice(0, 4)}-${code.slice(4)} thanks`, ts));
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].keyHash, KH);
+    assert.equal(routes[0].msg.type, 'status');
+    assert.equal(routes[0].msg.linked, true);
+    assert.equal(routes[0].msg.number, maskNumber('27821234567'));
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].text.body, /Connected: laptop/);
+    check('valid code links the machine and confirms');
+    const acc = await store.get('account:27821234567');
+    assert.equal(acc.balance, config.trialMicroUsd - price);
+    assert.equal(acc.windowUntil, ts + 86400000);
+    assert.deepEqual(acc.machines, [KH]);
+    assert.equal((await store.get('machine:' + KH)).number, '27821234567');
+    assert.equal(await store.get('code:' + code), undefined);
+    check('trial credit minus the confirmation, 24h window');
+
+    // dedupe and code reuse
+    routes = await relay.webhook(inbound('m1', '27821234567', code, ts));
+    assert.equal(routes.length, 0);
+    routes = await relay.webhook(inbound('m2', '27821234567', code, ts));
+    assert.equal(routes.length, 0);
+    assert.equal(sent.length, 1);
+    check('a code works once; duplicate inbound ids are skipped');
+
+    // window tracking
+    await relay.webhook(inbound('m3', '27821234567', 'hello', ts + 5000));
+    assert.equal((await store.get('account:27821234567')).windowUntil, ts + 5000 + 86400000);
+    check('inbound extends the window');
+
+    // stop and unlink
+    routes = await relay.webhook(inbound('m4', '27821234567', ' Stop ', ts + 6000));
+    assert.deepEqual(routes, [{ keyHash: KH, msg: { type: 'status', linked: false, number: null, balanceMicroUsd: null, billing: 'trial', botNumber: '27600000000' } }]);
+    assert.equal(sent.length, 2);
+    assert.match(sent[1].text.body, /Disconnected\./);
+    assert.deepEqual((await store.get('account:27821234567')).machines, []);
+    assert.equal((await store.get('machine:' + KH)).number, null);
+    check('stop unlinks every machine and says Disconnected.');
+
+    // wrong number, expired, stray
+    ({ store, sent, clock, relay } = setup());
+    await relay.hello(KH, { machine: 'laptop', version: '1' });
+    r = await relay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    routes = await relay.webhook(inbound('a1', '27829999999', r[0].code, clock.t));
+    assert.equal(routes.length + sent.length, 0);
+    assert.equal((await store.get('machine:' + KH)).number, null);
+    check('a code from another number does nothing');
+    clock.t += 11 * 60000;
+    routes = await relay.webhook(inbound('a2', '27821234567', r[0].code, clock.t));
+    assert.equal(routes.length + sent.length, 0);
+    assert.equal(await store.get('account:27821234567'), undefined);
+    check('an expired code does nothing');
+    routes = await relay.webhook(inbound('a3', '27821234567', 'hi there', clock.t));
+    assert.equal(routes.length + sent.length, 0);
+    check('stray text is ignored and free');
+
+    // unlink message
+    ({ store, sent, clock, relay } = setup());
+    await relay.hello(KH, { machine: 'laptop', version: '1' });
+    r = await relay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    await relay.webhook(inbound('b1', '27821234567', r[0].code, clock.t));
+    r = await relay.machineMessage(KH, { type: 'unlink' });
+    assert.equal(r.length, 1);
+    assert.equal(r[0].linked, false);
+    assert.deepEqual((await store.get('account:27821234567')).machines, []);
+    check('unlink returns an unlinked status');
+
+    // rate limit, bad number
+    r = await relay.machineMessage(KH, { type: 'link-start', number: 'nope' });
+    assert.deepEqual(r, [{ type: 'error', op: 'link-start', reason: 'bad-number' }]);
+    for (let i = 0; i < 3; i++) r = await relay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    assert.equal(r[0].type, 'link-code');
+    r = await relay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    assert.deepEqual(r, [{ type: 'error', op: 'link-start', reason: 'rate-limited' }]);
+    clock.t += 3600001;
+    r = await relay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    assert.equal(r[0].type, 'link-code');
+    check('link-start is limited to 5 per hour, bad numbers count');
+
+    // queue
+    ({ store, sent, clock, relay } = setup());
+    await relay.queue('kq', { type: 'a' });
+    await relay.queue('kq', { type: 'b' }, clock.t - 1);
+    await relay.queue('kq', { type: 'c' }, clock.t + 1000);
+    assert.equal((await store.get('outbox:kq'))[0].expiresAt, null);
+    r = await relay.hello('kq', { machine: 'm', version: '1' });
+    assert.deepEqual(r.slice(1), [{ type: 'a' }, { type: 'c' }]);
+    assert.equal(await store.get('outbox:kq'), undefined);
+    check('queue holds messages for hello, dropping expired ones');
+
+    // failed send releases the charge
+    ({ store, sent, clock, relay } = setup());
+    const failing = createRelay({ store, sender: { send: async () => ({ ok: false, error: 'x' }) }, config, now: () => clock.t });
+    await failing.hello(KH, { machine: 'laptop', version: '1' });
+    r = await failing.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    routes = await failing.webhook(inbound('c1', '27821234567', r[0].code, clock.t));
+    assert.equal((await store.get('account:27821234567')).balance, config.trialMicroUsd);
+    assert.equal(routes[0].msg.linked, true);
+    check('a failed send releases the reservation');
+  }
 
   console.log(`\n${passed} checks passed`);
 }
