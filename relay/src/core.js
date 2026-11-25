@@ -146,11 +146,14 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     const account = m && m.number ? await getAccount(m.number) : null;
     if (!account) return failed('not-linked');
     if (typeof pendingId !== 'string' || !pendingId || !validPrompt(prompt)) return failed('send-failed');
+    // A repeat of a prompt still open or deciding is already on the phone: no second send or charge.
+    const existing = await promptFor(keyHash, pendingId);
+    if (existing && existing.state !== 'closed') return [{ type: 'prompt-sent', pendingId }];
     const t = now();
     const expiresAt = Math.min(Number.isFinite(msg.expiresAt) ? msg.expiresAt : Infinity, t + MAX_PROMPT_MS);
     const ref = newRef();
     const number = m.number;
-    await store.put(promptKey(ref), { ref, keyHash, pendingId, number, prompt, qIndex: 0, answers: {}, expiresAt, state: 'open', closedWhy: null, createdAt: t });
+    await store.put(promptKey(ref), { ref, keyHash, pendingId, number, prompt, qIndex: 0, answers: {}, expiresAt, state: 'open', closedWhy: null, closedAt: null, createdAt: t });
     await store.put(pendingKey(keyHash, pendingId), ref);
     const payload = t < account.windowUntil - WINDOW_MARGIN_MS
       ? promptMessage(number, ref, prompt, 0)
@@ -163,13 +166,21 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     return [{ type: 'prompt-sent', pendingId }];
   }
 
+  // Every close goes through here. Prompt text and answers aren't kept once a prompt closes; only
+  // its kind stays, for late-tap replies.
+  async function close(p, why) {
+    p.state = 'closed';
+    p.closedWhy = why;
+    p.closedAt = now();
+    p.prompt = { kind: p.prompt.kind };
+    p.answers = {};
+    await store.put(promptKey(p.ref), p);
+  }
+
   // Re-reads the prompt, since a send may have let another event change it.
   async function closeIfOpen(ref, why) {
     const p = await store.get(promptKey(ref));
-    if (!p || p.state !== 'open') return;
-    p.state = 'closed';
-    p.closedWhy = why;
-    await store.put(promptKey(ref), p);
+    if (p && p.state === 'open') await close(p, why);
   }
 
   async function promptFor(keyHash, pendingId) {
@@ -187,9 +198,7 @@ export function createRelay({ store, sender, config, now = Date.now }) {
   async function decideAck(keyHash, msg) {
     const p = await promptFor(keyHash, msg.pendingId);
     if (!p || p.state !== 'deciding') return [];
-    p.state = 'closed';
-    p.closedWhy = msg.ok === true ? 'answered-phone' : 'gone';
-    await store.put(promptKey(p.ref), p);
+    await close(p, msg.ok === true ? 'answered-phone' : 'gone');
     if (msg.ok !== true) await sendAndSave(p.number, textMessage(p.number, TOO_LATE));
     return [];
   }

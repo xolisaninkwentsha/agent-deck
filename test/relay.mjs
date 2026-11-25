@@ -477,7 +477,7 @@ async function main() {
       assert.equal(sent.length, 2);
       assert.equal(sent[1].type, 'interactive');
       assert.deepEqual(sent[1].interactive.action.buttons.map((b) => b.reply.id), [`${ref}:allow`, `${ref}:deny`]);
-      assert.deepEqual(await store.get('prompt:' + ref), { ref, keyHash: 'kh1', pendingId: 'p1', number: N, prompt: approval, qIndex: 0, answers: {}, expiresAt: T0 + 600000, state: 'open', closedWhy: null, createdAt: T0 });
+      assert.deepEqual(await store.get('prompt:' + ref), { ref, keyHash: 'kh1', pendingId: 'p1', number: N, prompt: approval, qIndex: 0, answers: {}, expiresAt: T0 + 600000, state: 'open', closedWhy: null, closedAt: null, createdAt: T0 });
       assert.deepEqual(await store.get('msg:' + lastId()), { number: N, price, refunded: false, at: T0, ref, qIndex: 0 });
       clock.t += 5000;
       assert.deepEqual(await tap('t1', `${ref}:allow`), [decideRoute('kh1', 'p1', { behavior: 'allow' }, T0 + 600000)]);
@@ -762,6 +762,95 @@ async function main() {
       clock.t += 60001;
       assert.deepEqual((await relay.hello('kh1', { machine: 'kh1', version: '1' })).slice(1), []);
       check('decide is queued for an offline machine');
+    }
+
+    {
+      const { store, sent, sender, clock, relay, ask, tap, say, lastId } = await setup();
+      // Closed records keep only the kind: no prompt text, no answers, and when they closed.
+      const closedAs = async (ref, kind, why) => {
+        const p = await store.get('prompt:' + ref);
+        assert.deepEqual({ state: p.state, closedWhy: p.closedWhy, closedAt: p.closedAt, prompt: p.prompt, answers: p.answers }, { state: 'closed', closedWhy: why, closedAt: clock.t, prompt: { kind }, answers: {} });
+        for (const text of ['npm test', 'Run command', 'Do it', 'Colour?', 'Size?', 'Green', 'Red', 'XL']) assert.ok(!JSON.stringify(p).includes(text), text);
+      };
+      const lateReply = async (id, buttonId, body) => {
+        const count = sent.length;
+        assert.deepEqual(await tap(id, buttonId), []);
+        if (body === null) assert.equal(sent.length, count);
+        else assert.equal(sent.at(-1).text.body, body);
+      };
+      // answered on the computer: a tap, and a typed reply to the question, both get "Already answered"
+      let { ref } = await ask('kh1', 'p1', question(colour));
+      const qid = lastId();
+      clock.t += 1000;
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p1', why: 'answered' });
+      await closedAs(ref, 'question', 'answered');
+      await lateReply('a1', `${ref}:q0:o0`, ALREADY);
+      assert.deepEqual(await say('a2', 'Blue', qid), []);
+      assert.equal(sent.at(-1).text.body, ALREADY);
+      // timeout
+      ({ ref } = await ask('kh1', 'p2', approval));
+      clock.t += 1000;
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p2', why: 'timeout' });
+      await closedAs(ref, 'approval', 'timeout');
+      await lateReply('b1', `${ref}:allow`, TOO_LATE);
+      // the first send fails
+      clock.t += 1000;
+      sender.fail = true;
+      ({ ref } = await ask('kh1', 'p3', approval));
+      sender.fail = false;
+      await closedAs(ref, 'approval', 'send-failed');
+      await lateReply('c1', `${ref}:allow`, TOO_LATE);
+      // the next question's send fails, after an answer was recorded
+      ({ ref } = await ask('kh1', 'p4', question(colour, size)));
+      clock.t += 1000;
+      sender.fail = true;
+      await tap('d1', `${ref}:q0:o1`);
+      sender.fail = false;
+      await closedAs(ref, 'question', 'send-failed');
+      await lateReply('d2', `${ref}:q1:o0`, TOO_LATE);
+      // answered on the phone and acked: later taps are silent
+      ({ ref } = await ask('kh1', 'p5', question(colour, size)));
+      await tap('e1', `${ref}:q0:o1`);
+      assert.equal((await say('e2', 'XL', lastId())).length, 1);
+      clock.t += 1000;
+      await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p5', ok: true });
+      await closedAs(ref, 'question', 'answered-phone');
+      await lateReply('e3', `${ref}:q1:o3`, null);
+      // the daemon refuses the decide
+      ({ ref } = await ask('kh1', 'p6', planPrompt));
+      await tap('f1', `${ref}:plan`);
+      clock.t += 1000;
+      await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p6', ok: false, reason: 'gone' });
+      assert.equal(sent.at(-1).text.body, TOO_LATE);
+      await closedAs(ref, 'plan', 'gone');
+      await lateReply('f2', `${ref}:approve`, TOO_LATE);
+      check('closing a prompt keeps no prompt text or answers, and late taps still get the right reply');
+    }
+
+    {
+      const { store, sent, relay, ask, tap, balance } = await setup();
+      const { ref } = await ask('kh1', 'p1', approval);
+      const before = await balance();
+      const count = sent.length;
+      const repeat = async () => {
+        const again = await ask('kh1', 'p1', approval);
+        assert.deepEqual(again.r, [{ type: 'prompt-sent', pendingId: 'p1' }]);
+        assert.equal(again.ref, ref);
+        assert.equal(sent.length, count);
+        assert.equal(await balance(), before);
+        assert.equal((await store.list('prompt:')).size, 1);
+      };
+      await repeat(); // while open
+      assert.equal((await tap('t1', `${ref}:allow`)).length, 1);
+      await repeat(); // while deciding
+      assert.deepEqual(await tap('t2', `${ref}:allow`), []);
+      assert.deepEqual(await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p1', ok: true }), []);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'answered-phone']);
+      const fresh = await ask('kh1', 'p1', approval); // once closed, the pendingId can be sent afresh
+      assert.deepEqual(fresh.r, [{ type: 'prompt-sent', pendingId: 'p1' }]);
+      assert.notEqual(fresh.ref, ref);
+      assert.equal(sent.length, count + 1);
+      check('a repeated prompt for a pendingId still open or deciding is not sent or charged again');
     }
   }
 
