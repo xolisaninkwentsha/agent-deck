@@ -1,0 +1,26 @@
+{
+  "name": "agent-deck",
+  "version": "0.1.0",
+  "description": "A small always-on-top panel showing every Claude Code session on your machines, with approvals and answers from the panel.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "agent-deck": "bin/agent-deck.mjs"
+  },
+  "main": "widget/main.cjs",
+  "scripts": {
+    "start": "electron widget/main.cjs",
+    "widget": "electron widget/main.cjs",
+    "daemon": "node src/daemon.mjs",
+    "test": "node test/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0"
+  }
+}

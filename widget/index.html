@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src ws: wss:; img-src 'self' data:">
+  <title>Agent Deck</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="bar">
+    <span class="live-dot" id="live-dot"></span>
+    <span class="brand">Agent Deck</span>
+    <span class="count" id="count"></span>
+    <span class="dots" id="dots"></span>
+    <span class="spacer"></span>
+    <button class="icon" id="btn-approvals" title="Answer approvals and questions here"></button>
+    <button class="icon" id="btn-collapse" title="Collapse"></button>
+    <button class="icon" id="btn-close" title="Quit"></button>
+  </header>
+  <main id="list"></main>
+  <footer id="hubs"></footer>
+  <script src="renderer.js"></script>
+</body>
+</html>
