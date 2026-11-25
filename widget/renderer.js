@@ -14,7 +14,8 @@ const ICONS = {
   down: '<svg viewBox="0 0 16 16"><path d="M3.5 6 8 10.5 12.5 6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>',
   close: '<svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6"/></svg>',
   jump: '<svg viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 5 11M3 6v7h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
-  gear: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  // A cog with teeth (the old one, a circle with rays, read as a brightness control).
+  gear: '<svg viewBox="0 0 16 16"><path d="M6.9 1.5h2.2l.4 1.9 1.3.6 1.6-1.1 1.6 1.6-1.1 1.6.6 1.3 1.9.4v2.2l-1.9.4-.6 1.3 1.1 1.6-1.6 1.6-1.6-1.1-1.3.6-.4 1.9H6.9l-.4-1.9-1.3-.6-1.6 1.1-1.6-1.6 1.1-1.6-.6-1.3-1.9-.4V6.9l1.9-.4.6-1.3-1.1-1.6 1.6-1.6 1.6 1.1 1.3-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>',
 };
 
 const state = {
@@ -35,6 +36,7 @@ const state = {
   ts: { devices: [], pairing: {} }, // your Tailscale devices (Settings), and Connect requests in flight
   seenPairs: new Set(),  // pairing requests already notified
   pairBack: {},          // request id -> "also show its sessions here"
+  fullDetail: new Set(), // pending ids whose plan or command is shown in full
 };
 
 // ---------- settings ----------
@@ -425,11 +427,50 @@ function progressRow(s) {
     h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })), ctx);
 }
 
+// A plan (or other markdown) as readable text: headings, lists, paragraphs, **bold** and `code`.
+// Every piece goes in as text, never as HTML.
+function inlineMd(text) {
+  const out = [], re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(m[0].startsWith('**') ? h('strong', { text: m[0].slice(2, -2) }) : h('code', { text: m[0].slice(1, -1) }));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function planDoc(md) {
+  const blocks = [];
+  let list = null;
+  for (const raw of String(md).split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    const item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (item) {
+      const ordered = /^\s*\d/.test(line);
+      if (!list || list.ordered !== ordered) { list = { el: h(ordered ? 'ol' : 'ul', null), ordered }; blocks.push(list.el); }
+      list.el.append(h('li', null, inlineMd(item[1])));
+      continue;
+    }
+    list = null;
+    if (!line.trim() || /^```/.test(line)) continue;
+    const head = /^#{1,6}\s+(.*)$/.exec(line);
+    blocks.push(head ? h('h4', null, inlineMd(head[1])) : h('p', null, inlineMd(line)));
+  }
+  return blocks;
+}
+
 function approvalBox(hub, s, p) {
   const left = Math.max(0, Math.round((p.expiresAt - Date.now()) / 1000));
+  const isPlan = p.tool === 'ExitPlanMode';
+  const full = state.fullDetail.has(p.id);
+  const long = (p.detail || '').length > (isPlan ? 700 : 400) || (p.detail || '').split('\n').length > (isPlan ? 14 : 7);
   return h('div', { class: 'pending', onclick: (e) => e.stopPropagation() },
     h('div', { class: 'p-title', text: p.title }),
-    p.detail ? h('pre', { class: 'p-detail', text: p.detail }) : null,
+    p.detail && isPlan ? h('div', { class: 'plan-doc' + (full ? ' full' : '') }, planDoc(p.detail)) : null,
+    p.detail && !isPlan ? h('pre', { class: 'p-detail' + (full ? ' full' : ''), text: p.detail }) : null,
+    p.detail && long ? h('button', { class: 'more', text: full ? 'Show less' : 'Show all',
+      onclick: () => { if (full) state.fullDetail.delete(p.id); else state.fullDetail.add(p.id); render(); } }) : null,
     h('div', { class: 'btns' },
       h('button', { class: 'btn allow', text: 'Allow', onclick: () => decide(hub, p.id, { behavior: 'allow' }) }),
       p.canAlways ? h('button', { class: 'btn', text: 'Always', title: 'Allow and stop asking for this', onclick: () => decide(hub, p.id, { behavior: 'allow', always: true }) }) : null,
@@ -458,17 +499,17 @@ function questionBox(hub, s, p) {
     qs.map((q) => h('div', { class: 'question' },
       q.header ? h('span', { class: 'chip', text: q.header }) : null,
       h('div', { class: 'q-text', text: q.question }),
-      h('div', { class: 'options' }, q.options.map((o) => {
+      h('div', { class: 'options' + (q.options.some((o) => o.description) ? ' described' : '') }, q.options.map((o) => {
         const chosen = (draft.answers[q.question] || []).includes(o.label);
         return h('button', {
-          class: 'opt' + (chosen ? ' chosen' : ''), title: o.description || '', text: o.label,
+          class: 'opt' + (chosen ? ' chosen' : ''),
           onclick: () => {
             const cur = draft.answers[q.question] || [];
             draft.answers[q.question] = q.multiSelect ? (chosen ? cur.filter((x) => x !== o.label) : [...cur, o.label]) : [o.label];
             draft.other[q.question] = '';
             if (single) submit(); else render();
           },
-        });
+        }, h('span', { class: 'opt-label', text: o.label }), o.description ? h('span', { class: 'opt-desc', text: o.description }) : null);
       })),
       h('input', {
         class: 'other', placeholder: 'Or type an answer…', value: draft.other[q.question] || '',
@@ -670,6 +711,7 @@ function render() {
   if (!state.composing) {
     const list = document.getElementById('list');
     list.hidden = state.collapsed;
+    const scrolled = list.scrollTop; // a rebuild mustn't jump back to the top
     if (state.settingsOpen) {
       // Rebuild only when a setting changed: a snapshot re-render would close an open dropdown.
       if (state.settingsDirty || !list.querySelector('.settings')) {
@@ -687,6 +729,7 @@ function render() {
       const agentsPart = agentItems.length ? [h('div', { class: 'section-head', text: 'Agents' }), ...agentItems.map(agentCard)] : [];
       list.replaceChildren(...sessionsPart, ...agentsPart);
     }
+    list.scrollTop = scrolled;
     // Put focus back only if that question is still open; an answered one is gone.
     const again = focusKey && [...list.querySelectorAll('input.other')].find((el) => el.dataset.key === focusKey);
     if (again) { again.focus(); try { again.setSelectionRange(caret[0], caret[1]); } catch {} }
@@ -698,7 +741,18 @@ function render() {
   footer.hidden = state.collapsed || state.hubs.length < 2;
   footer.replaceChildren(...state.hubs.map((x) => h('span', { class: 'hub' + (x.connected ? ' up' : ''), title: x.url, text: x.name })));
 
-  requestAnimationFrame(() => window.deck.resize(document.body.scrollHeight));
+  requestAnimationFrame(() => window.deck.resize(naturalHeight()));
+}
+// How tall the panel wants to be: everything at full size, the list unscrolled. Main caps it
+// (85% of the screen) and the list scrolls beyond that.
+function naturalHeight() {
+  const list = document.getElementById('list');
+  let height = 2; // body border
+  for (const el of document.body.children) {
+    if (el.tagName === 'SCRIPT') continue;
+    height += el === list ? (list.hidden ? 0 : list.scrollHeight) : el.getBoundingClientRect().height;
+  }
+  return Math.ceil(height);
 }
 
 // Countdowns and "ago" labels tick without a full re-render.

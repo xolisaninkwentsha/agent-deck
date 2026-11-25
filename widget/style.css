@@ -52,6 +52,10 @@ html, body {
   user-select: none; overflow: hidden;
 }
 body { border: 1px solid var(--line); border-radius: 12px; }
+/* The window grows with its content up to 85% of the screen; past that, the list scrolls. */
+html, body { height: 100%; }
+body { display: flex; flex-direction: column; }
+#bar, #requests, #hubs { flex: none; }
 button { font: inherit; color: inherit; cursor: pointer; }
 
 /* header (drag handle) */
@@ -80,7 +84,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .icon.small svg { width: 12px; height: 12px; }
 
 /* list */
-#list { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 6px; }
+#list { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+#list::-webkit-scrollbar { width: 6px; }
+#list::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .empty { color: var(--muted); padding: 14px 8px 10px; text-align: center; }
 .empty .hint { font-size: 11.5px; margin-top: 4px; opacity: .8; }
 
@@ -149,8 +155,21 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .p-detail {
   margin: 4px 0 0; padding: 6px 7px; background: var(--well); border-radius: 6px; color: var(--well-text);
   font: 11px/1.4 ui-monospace, "SF Mono", Menlo, "Ubuntu Mono", monospace;
-  white-space: pre-wrap; word-break: break-word; max-height: 64px; overflow: auto; user-select: text;
+  white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow: auto; user-select: text;
 }
+.p-detail.full, .plan-doc.full { max-height: none; }
+/* a plan, as readable text */
+.plan-doc {
+  margin: 5px 0 0; padding: 8px 10px; background: var(--well); color: var(--well-text); border-radius: 7px;
+  font-size: 12px; line-height: 1.45; user-select: text; max-height: 260px; overflow-y: auto; word-break: break-word;
+}
+.plan-doc h4 { margin: 9px 0 3px; font-size: 12.5px; color: var(--text); }
+.plan-doc h4:first-child { margin-top: 0; }
+.plan-doc p { margin: 3px 0; }
+.plan-doc ul, .plan-doc ol { margin: 3px 0; padding-left: 18px; }
+.plan-doc li { margin: 1px 0; }
+.plan-doc code { font: 11px ui-monospace, "SF Mono", Menlo, "Ubuntu Mono", monospace; background: var(--card-hi); padding: 0 3px; border-radius: 3px; }
+.more { background: none; border: 0; padding: 2px 0; margin-top: 3px; color: var(--question); font-size: 11px; }
 .btns { display: flex; gap: 5px; margin-top: 7px; flex-wrap: wrap; }
 .btn {
   border: 1px solid var(--line); background: var(--btn); border-radius: 7px; padding: 3px 10px; font-weight: 600;
@@ -163,11 +182,17 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .countdown { color: var(--muted); font-size: 10.5px; margin-top: 5px; }
 .question + .question { margin-top: 8px; }
 .chip { display: inline-block; font-size: 10px; color: var(--question); border: 1px solid var(--chip-line); border-radius: 999px; padding: 0 6px; margin-bottom: 3px; }
-.q-text { font-weight: 600; color: var(--text); }
+.q-text { font-weight: 600; color: var(--text); line-height: 1.4; user-select: text; }
 .options { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 .opt { border: 1px solid var(--line); background: var(--btn); border-radius: 7px; padding: 3px 9px; }
 .opt:hover { border-color: var(--question); }
 .opt.chosen { background: var(--question); color: var(--on-question); border-color: var(--question); }
+/* options that come with a description: one per line, description visible */
+.options.described { flex-direction: column; }
+.options.described .opt { text-align: left; padding: 5px 9px; }
+.opt-label { font-weight: 600; }
+.opt-desc { display: block; font-size: 11px; color: var(--muted); margin-top: 1px; line-height: 1.35; }
+.opt.chosen .opt-desc { color: inherit; opacity: .85; }
 .other {
   width: 100%; margin-top: 6px; background: var(--well); color: var(--text); border: 1px solid var(--line);
   border-radius: 6px; padding: 4px 7px; font: inherit; user-select: text;
