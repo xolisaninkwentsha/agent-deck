@@ -4,3 +4,4 @@ agent-deck.gitbundle
 test/live/.work/
 test/live/.pylib/
 __pycache__/
+HANDOFF.private.md
