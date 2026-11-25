@@ -153,7 +153,8 @@ function approvalBox(hub, s, p) {
       h('button', { class: 'btn ghost', text: 'Terminal', title: 'Answer in the terminal instead', onclick: () => release(hub, p.id) })),
     h('div', { class: 'countdown', 'data-expires': p.expiresAt, text: countdownText(left) }));
 }
-const countdownText = (left) => `Goes back to the terminal in ${left}s`;
+// Claude Code shows the prompt in the terminal too; after this the panel can no longer answer.
+const countdownText = (left) => `Answer here or in the terminal · ${left >= 60 ? Math.ceil(left / 60) + ' min' : left + 's'} left here`;
 
 function questionBox(hub, s, p) {
   const draft = state.drafts[p.id] || (state.drafts[p.id] = { answers: {}, other: {} });
