@@ -32,16 +32,33 @@ function main() {
   assert.equal(maskSecrets('echo \'{"token": 12345, "name": "x"}\''), `echo '{"token": ${M}, "name": "x"}'`);
   check('masks shell-escaped JSON and non-string JSON secret values');
 
+  assert.equal(maskSecrets('{"password": "hun\\"ter2"}'), `{"password": "${M}"}`);
+  assert.equal(maskSecrets('{"token": "a\\\\b"}'), `{"token": "${M}"}`);
+  assert.equal(maskSecrets('{"api_key": "ABC"}'), `{"api_key": "${M}"}`);
+  check('masks JSON values that contain escapes');
+
+  for (const hostile of ['a'.repeat(50000) + '-key', 'x-'.repeat(25000), 'K'.repeat(50000), '"key' + ' '.repeat(50000), 'a'.repeat(50000) + '://']) {
+    const t0 = performance.now();
+    maskSecrets(hostile);
+    assert.ok(performance.now() - t0 < 200, `maskSecrets too slow on ${hostile.slice(0, 8)}`);
+  }
+  const long = phoneSummary({ toolName: 'Bash', toolInput: { command: 'echo ' + 'x'.repeat(50000) + ' TOKEN=abc1' }, project: 'p' });
+  assert.ok(long.detail.length <= LIMITS.detail);
+  check('masking stays fast on hostile input');
+
   assert.equal(maskSecrets('curl -u admin:hunter2 https://x.io'), `curl -u ${M} https://x.io`);
   assert.equal(maskSecrets('curl --user admin:hunter2 https://x.io'), `curl --user ${M} https://x.io`);
   assert.equal(maskSecrets('mysql -uroot -phunter2 app'), `mysql -uroot -p${M} app`);
-  check('masks user:pass credentials and attached -p passwords');
+  assert.equal(maskSecrets('mysqldump -psecret app'), `mysqldump -p${M} app`);
+  assert.equal(maskSecrets('mysql -uroot -phunter2 db'), `mysql -uroot -p${M} db`);
+  assert.equal(maskSecrets('cd /x && mysql -phunter2 db | gzip -pv'), `cd /x && mysql -p${M} db | gzip -pv`);
+  check('masks user:pass credentials and attached -p passwords (MySQL clients only)');
 
   assert.equal(maskSecrets('API_KEY="abc def" run'), `API_KEY=${M} run`);
   assert.equal(maskSecrets('DB_PASSWORD=\'a b\' run'), `DB_PASSWORD=${M} run`);
   check('masks quoted NAME=value values');
 
-  for (const plain of ['serve -p 8080', 'docker run -p 3000:3000 img', 'find . -print', 'mysql -u root app', 'curl -H "Accept: text/html" https://x.io', 'ssh -p 22 host']) assert.equal(maskSecrets(plain), plain);
+  for (const plain of ['serve -p 8080', 'docker run -p 3000:3000 img', 'find . -print', 'mysql -u root app', 'curl -H "Accept: text/html" https://x.io', 'ssh -p 22 host', 'cp -pr src dst', 'mkdir -pv a/b', 'ls -pa', 'lsof -p1234', 'pytest -pno:cacheprovider', 'ssh -p22 host', 'docker run -p3000:3000 img'])assert.equal(maskSecrets(plain), plain);
   check('leaves port flags and ordinary headers alone');
 
   for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/agent-deck/node_modules']) assert.equal(maskSecrets(plain), plain);
