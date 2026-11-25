@@ -90,14 +90,13 @@ async function createWindow() {
   // fire ready-to-show for a hidden frameless window. showInactive() doesn't map the
   // window under GNOME, so Linux uses a normal show().
   let shown = false;
+  let placed = false; // true once our own initial positioning is over; later moves are the user's
   const reveal = (why) => {
     if (shown || win.isDestroyed()) return;
     shown = true;
     if (process.platform === 'linux') win.show(); else win.showInactive();
     win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'floating' : 'screen-saver');
-    // GNOME (mutter) often ignores the position a new X11 window asks for and places it
-    // itself, so move it to the saved (or default) spot once it is on screen.
-    if (process.platform === 'linux') setTimeout(() => { if (!win.isDestroyed()) win.setPosition(pos.x, pos.y); }, 250);
+    setTimeout(() => { placed = true; }, 1000); // ignore the window manager's initial placement
     console.log(`[agent-deck] window shown (${why}) at ${JSON.stringify(win.getBounds())}; displays: ${JSON.stringify(screen.getAllDisplays().map((d) => ({ bounds: d.bounds, workArea: d.workArea, scale: d.scaleFactor })))}`);
   };
   win.once('ready-to-show', () => reveal('ready'));
@@ -118,8 +117,11 @@ async function createWindow() {
     }, Number(process.env.AGENT_DECK_SCREENSHOT_DELAY || 3000));
   }
 
+  // Remember where the panel was dragged. 'moved' only exists on macOS and Windows, so use
+  // 'move' (fires repeatedly while dragging) and save once it settles.
   let moveTimer = null;
-  win.on('moved', () => {
+  win.on('move', () => {
+    if (!placed) return;
     clearTimeout(moveTimer);
     moveTimer = setTimeout(() => { const [x, y] = win.getPosition(); config.saveConfig({ window: { x, y } }); }, 400);
   });
@@ -142,7 +144,8 @@ ipcMain.on('resize', (_e, height) => {
   const area = screen.getDisplayMatching(win.getBounds()).workArea;
   const h = Math.max(48, Math.min(Math.ceil(height), Math.floor(area.height * 0.85)));
   const [, cur] = win.getSize();
-  if (cur !== h) win.setBounds({ ...win.getBounds(), width: WIDTH, height: h });
+  // setSize, not setBounds: a height change should never write a (possibly stale) position back.
+  if (cur !== h) win.setSize(WIDTH, h);
 });
 
 ipcMain.on('set-approvals', (_e, enabled) => { config.saveConfig({ approvalsInWidget: Boolean(enabled) }); });
