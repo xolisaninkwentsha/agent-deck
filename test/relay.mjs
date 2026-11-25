@@ -180,6 +180,10 @@ async function main() {
   assert.equal(normalizeNumber('+1234567890123456'), null);
   assert.equal(normalizeNumber('+12345678'), '12345678');
   assert.equal(normalizeNumber('+27abc821234567'), null);
+  assert.equal(normalizeNumber('+27 (0)82 123 4567'), '27821234567');
+  assert.equal(normalizeNumber('+27 ( 0 ) 82 123 4567'), '27821234567');
+  assert.equal(normalizeNumber('+0821234567'), null);
+  assert.equal(normalizeNumber('00 0821234567'), null);
   assert.equal(normalizeNumber(''), null);
   assert.equal(normalizeNumber(undefined), null);
   assert.equal(maskNumber('27821234567'), '+27•••••4567');
@@ -224,6 +228,10 @@ async function main() {
   assert.deepEqual(reserve(rich, 1, 2000, 60), { ok: false, reason: 'rate-limited' });
   assert.equal(rich.balance, 1e9 - 60);
   assert.equal(reserve(rich, 1, 1000 + 3600000 + 1, 60).ok, true);
+  const edge = { balance: 100, sent: [] };
+  assert.equal(reserve(edge, 1, 5000, 1).ok, true);
+  assert.deepEqual(reserve(edge, 1, 5000 + 3599999, 1), { ok: false, reason: 'rate-limited' });
+  assert.deepEqual(reserve(edge, 1, 5000 + 3600000, 1), { ok: true });
   const zero = { balance: 0, sent: [] };
   assert.equal(reserve(zero, 0, 1, 2).ok, true);
   assert.equal(reserve(zero, 0, 2, 2).ok, true);

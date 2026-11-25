@@ -38,10 +38,11 @@ export async function sha256Hex(s) {
 
 export function normalizeNumber(input) {
   if (typeof input !== 'string') return null;
-  let s = input.replace(/[\s\-.()[\]]/g, '');
+  let s = input.replace(/\(\s*0\s*\)/g, '').replace(/[\s\-.()[\]]/g, '');
   if (s.startsWith('+')) s = s.slice(1);
   else if (s.startsWith('00')) s = s.slice(2);
   else if (s.startsWith('0')) return null;
+  if (s.startsWith('0')) return null; // no country code starts with 0
   return /^\d{8,15}$/.test(s) ? s : null;
 }
 
