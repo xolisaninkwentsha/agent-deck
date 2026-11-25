@@ -135,6 +135,7 @@ export function applyEvent(s, event, input, meta) {
   if (meta.termProgram) s.termProgram = meta.termProgram;
   if (input.cwd && !s.cwd) { s.cwd = input.cwd; s.project = base(input.cwd); }
   if (input.transcript_path) s.transcript = input.transcript_path;
+  if (input.permission_mode) s.permissionMode = input.permission_mode; // Shift+Tab changes it mid-session
   s.dismissed = false;
 
   switch (event) {
@@ -263,6 +264,7 @@ export function publicView(s, { warnPercent = 80 } = {}) {
     // Claude Code's own session name reads better than the first prompt (which can be a paste).
     key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.name || s.title,
     watchOnly: s.source === 'discovered',
+    permissionMode: s.permissionMode || null,
     status: s.status, step: s.step, steps: s.steps.slice(-10), progress: progressOf(s),
     background: s.background, subagents: Object.entries(s.subagents).map(([id, a]) => ({ id, ...a })),
     pending: s.pending ? { ...s.pending, resolve: undefined } : null,

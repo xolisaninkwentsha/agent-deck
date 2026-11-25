@@ -313,6 +313,20 @@ function details(s) {
   return h('div', { class: 'details' }, rows);
 }
 
+// Claude Code's permission mode, when it isn't the default (Shift+Tab in the session changes it).
+const MODES = {
+  acceptEdits: ['accept edits', 'Accept edits: file edits run without asking; commands still ask'],
+  plan: ['plan', 'Plan mode: Claude plans and asks before making changes'],
+  auto: ['auto', 'Auto mode: Claude Code decides which actions need your approval'],
+  bypassPermissions: ['bypass', 'Bypass permissions: Claude Code won\'t ask before running tools'],
+  dontAsk: ['don\'t ask', 'Don\'t ask: tools that would need approval are refused instead'],
+};
+function modeBadge(mode) {
+  if (!mode || mode === 'default') return null;
+  const [label, title] = MODES[mode] || [mode, `Permission mode: ${mode}`];
+  return h('span', { class: 'mode' + (mode === 'bypassPermissions' ? ' bypass' : ''), text: label, title });
+}
+
 function card({ hub, s }) {
   const open = state.expanded.has(s.key);
   const multi = state.hubs.length > 1;
@@ -331,6 +345,7 @@ function card({ hub, s }) {
       h('div', { class: 'side' },
         multi ? h('span', { class: 'host', text: hub.name }) : null,
         s.watchOnly ? h('span', { class: 'watch', text: 'watch only', title: 'Started before Agent Deck\'s hooks were installed. Restart the session to answer from here.' }) : null,
+        modeBadge(s.permissionMode),
         h('div', { class: 'side-btns' },
           hub.local && s.canJump ? h('button', { class: 'icon small', title: 'Jump to this session', html: ICONS.jump, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'jump', key: s.key }); } }) : null,
           h('button', { class: 'icon small', title: 'Hide this card', html: ICONS.close, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'dismiss', key: s.key }); } })))),

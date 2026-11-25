@@ -93,6 +93,10 @@ The file isn't a documented Claude Code format (checked with 2.1.332). If it cha
 - `agent-deck toggle | show | hide` does the same from a terminal or script.
 - **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `agent-deck shortcut` once. It adds a GNOME custom shortcut ("Agent Deck" in Settings > Keyboard > Custom Shortcuts) that runs `agent-deck toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `agent-deck shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
 
+## Permission mode
+
+A card shows a small badge when a session isn't in the default permission mode: **accept edits**, **plan**, **auto**, **don't ask**, or **bypass** (red: Claude Code won't ask before running tools, so no approvals will come). It follows Shift+Tab changes from the next thing the session does. Watch-only sessions don't show it, because only hooks report the mode.
+
 ## Settings
 
 The **gear** in the panel header opens the settings; Esc or the gear goes back.

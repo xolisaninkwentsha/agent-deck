@@ -75,6 +75,13 @@ async function main() {
   assert.equal(sess().title, 'Add streaming support to the speech API');
   ok('current step and title update from tool calls');
 
+  // 3b. Permission mode from the hook input, following Shift+Tab changes.
+  await hook('observe', base('PreToolUse', { tool_name: 'Read', tool_input: { file_path: '/work/voice-api/a.py' }, permission_mode: 'plan' }));
+  await until(() => sess()?.permissionMode === 'plan', 'plan mode');
+  await hook('observe', base('PreToolUse', { tool_name: 'Read', tool_input: { file_path: '/work/voice-api/b.py' }, permission_mode: 'auto' }));
+  await until(() => sess()?.permissionMode === 'auto', 'auto mode');
+  ok('permission mode follows the hook input (plan, then auto)');
+
   // 4. Task progress.
   await hook('observe', base('TaskCreated', { task_id: 'a', task_subject: 'Write tests' }));
   await hook('observe', base('TaskCreated', { task_id: 'b', task_subject: 'Wire endpoint' }));
