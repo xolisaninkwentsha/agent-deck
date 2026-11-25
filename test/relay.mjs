@@ -429,6 +429,342 @@ async function main() {
     check("billing 'off' creates the account with balance 0");
   }
 
+  // relay core: prompts and answers
+  {
+    const config = { botNumber: '27600000000', billing: 'trial', trialMicroUsd: 1000000, rates: { default: 10000 }, markupPercent: 20, hourlyCap: 60, codeTtlMs: 600000, windowMs: 86400000, template: { name: 't', lang: 'en' } };
+    const N = '27821234567';
+    const N2 = '27829999999';
+    const T0 = 1700000000000;
+    const price = priceFor(N, config);
+    const TOO_LATE = "Too late: it's waiting in the terminal.";
+    const ALREADY = 'Already answered on the computer.';
+    // A fresh relay with each [keyHash, number] linked; every "Connected" is one charged message.
+    const setup = async (links = [['kh1', N]]) => {
+      const store = new MemoryStore();
+      const sent = [];
+      const sender = { fail: false, send: async (p) => { if (sender.fail) return { ok: false, error: 'x' }; sent.push(p); return { ok: true, id: 'w' + sent.length }; } };
+      const clock = { t: T0 };
+      const relay = createRelay({ store, sender, config, now: () => clock.t });
+      let n = 0;
+      for (const [kh, number] of links) {
+        await relay.hello(kh, { machine: kh, version: '1' });
+        const [lc] = await relay.machineMessage(kh, { type: 'link-start', number });
+        await relay.webhook({ inbound: [{ id: 'link' + n++, from: number, text: lc.code, ts: clock.t }], statuses: [] });
+      }
+      const ask = async (kh, pendingId, prompt, expiresAt = clock.t + 300000) => {
+        const r = await relay.machineMessage(kh, { type: 'prompt', pendingId, expiresAt, prompt });
+        return { r, ref: await store.get(`pending:${kh}:${pendingId}`) };
+      };
+      const tap = (id, buttonId, from = N) => relay.webhook({ inbound: [{ id, from, ts: clock.t, buttonId }], statuses: [] });
+      const say = (id, text, contextId, from = N) => relay.webhook({ inbound: [{ id, from, ts: clock.t, text, ...(contextId ? { contextId } : {}) }], statuses: [] });
+      const lastId = () => 'w' + sent.length;
+      const balance = async (number = N) => (await store.get('account:' + number)).balance;
+      return { store, sent, sender, clock, relay, ask, tap, say, lastId, balance };
+    };
+    const decideRoute = (keyHash, pendingId, decision, expiresAt) => ({ keyHash, msg: { type: 'decide', pendingId, decision }, expiresAt });
+    const approval = { kind: 'approval', project: 'deck', title: 'Run command', detail: 'npm test', questions: [] };
+    const planPrompt = { kind: 'plan', project: 'deck', title: 'Plan', detail: 'Do it', questions: [] };
+    const question = (...questions) => ({ kind: 'question', project: 'deck', title: 'Question', detail: '', questions });
+    const colour = { question: 'Colour?', header: 'Colour', multiSelect: false, options: ['Red', 'Green'] };
+    const size = { question: 'Size?', header: 'Size', multiSelect: false, options: ['S', 'M', 'L', 'XL'] };
+    const pick = { question: 'Which?', header: 'Pick', multiSelect: true, options: ['A', 'B', 'C'] };
+    const stateOf = async (store, ref) => { const p = await store.get('prompt:' + ref); return [p.state, p.closedWhy]; };
+
+    {
+      const { store, sent, clock, relay, ask, tap, lastId } = await setup();
+      const { r, ref } = await ask('kh1', 'p1', approval, T0 + 900000);
+      assert.deepEqual(r, [{ type: 'prompt-sent', pendingId: 'p1' }]);
+      assert.equal(sent.length, 2);
+      assert.equal(sent[1].type, 'interactive');
+      assert.deepEqual(sent[1].interactive.action.buttons.map((b) => b.reply.id), [`${ref}:allow`, `${ref}:deny`]);
+      assert.deepEqual(await store.get('prompt:' + ref), { ref, keyHash: 'kh1', pendingId: 'p1', number: N, prompt: approval, qIndex: 0, answers: {}, expiresAt: T0 + 600000, state: 'open', closedWhy: null, createdAt: T0 });
+      assert.deepEqual(await store.get('msg:' + lastId()), { number: N, price, refunded: false, at: T0, ref, qIndex: 0 });
+      clock.t += 5000;
+      assert.deepEqual(await tap('t1', `${ref}:allow`), [decideRoute('kh1', 'p1', { behavior: 'allow' }, T0 + 600000)]);
+      assert.equal(sent.length, 2);
+      assert.deepEqual(await stateOf(store, ref), ['deciding', null]);
+      assert.deepEqual(await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p1', ok: true }), []);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'answered-phone']);
+      assert.deepEqual(await tap('t2', `${ref}:deny`), []);
+      assert.equal(sent.length, 2);
+      await relay.machineMessage('kh1', { type: 'prompt', pendingId: 'p2', prompt: approval });
+      assert.equal((await store.get('prompt:' + (await store.get('pending:kh1:p2')))).expiresAt, clock.t + 600000);
+      check('prompt in window');
+    }
+
+    {
+      const { store, sent, clock, ask, tap, balance } = await setup();
+      const windowUntil = (await store.get('account:' + N)).windowUntil;
+      clock.t = windowUntil - 300001;
+      await ask('kh1', 'p0', approval);
+      assert.equal(sent.at(-1).type, 'interactive');
+      clock.t = windowUntil - 300000;
+      const before = await balance();
+      const { r, ref } = await ask('kh1', 'p1', approval);
+      assert.deepEqual(r, [{ type: 'prompt-sent', pendingId: 'p1' }]);
+      const tpl = sent.at(-1);
+      assert.equal(tpl.type, 'template');
+      assert.equal(tpl.template.name, 't');
+      assert.deepEqual(tpl.template.components[1].parameters, [{ type: 'payload', payload: `${ref}:show` }]);
+      assert.deepEqual(await tap('s1', `${ref}:show`), []);
+      assert.equal(sent.at(-1).type, 'interactive');
+      assert.deepEqual(sent.at(-1).interactive.action.buttons.map((b) => b.reply.id), [`${ref}:allow`, `${ref}:deny`]);
+      assert.equal(await balance(), before - 2 * price);
+      assert.deepEqual(await stateOf(store, ref), ['open', null]);
+      check('prompt outside window');
+    }
+
+    {
+      const { store, sent, ask, tap } = await setup();
+      const { ref } = await ask('kh1', 'p1', planPrompt);
+      assert.deepEqual(sent.at(-1).interactive.action.buttons.map((b) => b.reply.id), [`${ref}:approve`, `${ref}:plan`]);
+      assert.deepEqual(await tap('t0', `${ref}:allow`), []);
+      assert.deepEqual(await stateOf(store, ref), ['open', null]);
+      assert.deepEqual(await tap('t1', `${ref}:plan`), [decideRoute('kh1', 'p1', { behavior: 'deny', message: 'Not yet: keep planning.' }, T0 + 300000)]);
+      const { ref: ref2 } = await ask('kh1', 'p2', planPrompt);
+      assert.deepEqual((await tap('t2', `${ref2}:approve`))[0].msg, { type: 'decide', pendingId: 'p2', decision: { behavior: 'allow' } });
+      check('plan');
+    }
+
+    {
+      const { store, sent, ask, tap, say, lastId } = await setup();
+      const { ref } = await ask('kh1', 'p1', question(colour, size));
+      const first = lastId();
+      assert.deepEqual(sent.at(-1).interactive.action.buttons.map((b) => b.reply.id), [`${ref}:q0:o0`, `${ref}:q0:o1`]);
+      assert.deepEqual(await tap('t1', `${ref}:q0:o1`), []);
+      const second = lastId();
+      assert.notEqual(second, first);
+      assert.equal(sent.at(-1).interactive.type, 'list');
+      assert.deepEqual(sent.at(-1).interactive.action.sections[0].rows.map((row) => row.id), [0, 1, 2, 3].map((i) => `${ref}:q1:o${i}`));
+      assert.deepEqual(await store.get('msg:' + second), { number: N, price, refunded: false, at: T0, ref, qIndex: 1 });
+      const count = sent.length;
+      assert.deepEqual(await tap('t2', `${ref}:q0:o0`), []);
+      assert.deepEqual(await say('x1', 'Blue', first), []);
+      assert.equal(sent.length, count);
+      assert.deepEqual((await store.get('prompt:' + ref)).answers, { 'Colour?': 'Green' });
+      assert.deepEqual(await say('x2', '  Extra large ', second), [decideRoute('kh1', 'p1', { answers: { 'Colour?': 'Green', 'Size?': 'Extra large' } }, T0 + 300000)]);
+      assert.equal(sent.length, count);
+      check('two questions');
+    }
+
+    {
+      const { sent, ask, say, lastId } = await setup();
+      const answerTo = async (pendingId, q, text) => {
+        await ask('kh1', pendingId, question(q));
+        assert.equal(sent.at(-1).type, 'text');
+        const routes = await say('x' + pendingId, text, lastId());
+        assert.equal(routes.length, 1);
+        assert.equal(routes[0].msg.pendingId, pendingId);
+        return routes[0].msg.decision.answers[q.question];
+      };
+      assert.equal(await answerTo('p1', pick, '1 3'), 'A, C');
+      assert.equal(await answerTo('p2', pick, 'blue please'), 'blue please');
+      assert.equal(await answerTo('p3', pick, '3,1'), 'C, A');
+      assert.equal(await answerTo('p4', pick, '1, 4'), '1, 4');
+      const many = { question: 'Which file?', header: 'File', multiSelect: false, options: Array.from({ length: 12 }, (_, i) => `f${i + 1}`) };
+      assert.equal(await answerTo('p5', many, ' 12 '), 'f12');
+      check('multi-select');
+    }
+
+    {
+      const { ask, say, lastId } = await setup();
+      assert.notEqual(findCode('database'), null);
+      await ask('kh1', 'p1', question(colour));
+      assert.deepEqual(await say('x1', 'database', lastId()), [decideRoute('kh1', 'p1', { answers: { 'Colour?': 'database' } }, T0 + 300000)]);
+      check('a typed answer that looks like a link code still answers');
+    }
+
+    {
+      const { sent, clock, ask, say } = await setup();
+      await ask('kh1', 'p1', question(colour));
+      clock.t += 1000;
+      await ask('kh1', 'p2', question(size));
+      clock.t += 1000;
+      await ask('kh1', 'p3', approval);
+      clock.t += 1000;
+      await ask('kh1', 'p4', question(pick), clock.t + 60000); // newest, but expires first
+      clock.t += 60001;
+      const count = sent.length;
+      const brief = (routes) => routes.map((r) => [r.keyHash, r.msg.pendingId, r.msg.decision]);
+      assert.deepEqual(brief(await say('x1', 'Purple', 'w1')), [['kh1', 'p2', { answers: { 'Size?': 'Purple' } }]]);
+      assert.deepEqual(brief(await say('x2', 'Teal', 'wamid.unknown')), [['kh1', 'p1', { answers: { 'Colour?': 'Teal' } }]]);
+      assert.deepEqual(await say('x3', 'yes'), []);
+      assert.deepEqual(await say('x4', 'hello', undefined, N2), []);
+      assert.equal(sent.length, count);
+      check('typed text without context');
+    }
+
+    {
+      const { ask, tap } = await setup([['k1', N], ['k2', N]]);
+      const { ref: r1 } = await ask('k1', 'p1', approval);
+      const { ref: r2 } = await ask('k2', 'p1', approval);
+      assert.notEqual(r1, r2);
+      assert.deepEqual(await tap('t2', `${r2}:allow`), [decideRoute('k2', 'p1', { behavior: 'allow' }, T0 + 300000)]);
+      assert.deepEqual(await tap('t1', `${r1}:allow`), [decideRoute('k1', 'p1', { behavior: 'allow' }, T0 + 300000)]);
+      check('two machines, one number');
+    }
+
+    {
+      const { store, clock, relay, ask, balance } = await setup();
+      clock.t = (await store.get('account:' + N)).windowUntil;
+      const { ref } = await ask('kh1', 'p1', approval);
+      const before = await balance();
+      const show = { inbound: [{ id: 'dup1', from: N, ts: clock.t, buttonId: `${ref}:show` }], statuses: [] };
+      await relay.webhook(show);
+      await relay.webhook(show);
+      const allow = { inbound: [{ id: 'dup2', from: N, ts: clock.t, buttonId: `${ref}:allow` }], statuses: [] };
+      const routes = [...(await relay.webhook(allow)), ...(await relay.webhook(allow))];
+      assert.deepEqual(routes, [decideRoute('kh1', 'p1', { behavior: 'allow' }, clock.t + 300000)]);
+      assert.equal(await balance(), before - price);
+      check('duplicate inbound id is ignored');
+    }
+
+    {
+      const { store, sent, clock, relay, ask, tap } = await setup();
+      let { ref } = await ask('kh1', 'p1', approval);
+      assert.deepEqual(await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p1', why: 'answered' }), []);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'answered']);
+      assert.deepEqual(await tap('t1', `${ref}:allow`), []);
+      assert.equal(sent.at(-1).text.body, ALREADY);
+      ({ ref } = await ask('kh1', 'p2', approval));
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p2', why: 'timeout' });
+      assert.deepEqual(await tap('t2', `${ref}:deny`), []);
+      assert.equal(sent.at(-1).text.body, TOO_LATE);
+      ({ ref } = await ask('kh1', 'p3', approval, clock.t + 60000));
+      clock.t += 60001;
+      let count = sent.length;
+      assert.deepEqual(await tap('t3', `${ref}:allow`), []);
+      assert.equal(sent.length, count + 1);
+      assert.equal(sent.at(-1).text.body, TOO_LATE);
+      ({ ref } = await ask('kh1', 'p4', approval));
+      assert.equal((await tap('t4', `${ref}:allow`)).length, 1);
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p4', why: 'answered' });
+      assert.deepEqual(await stateOf(store, ref), ['deciding', null]);
+      count = sent.length;
+      assert.deepEqual(await tap('t5', `${ref}:allow`), []);
+      assert.equal(sent.length, count);
+      assert.deepEqual(await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p4', ok: false, reason: 'gone' }), []);
+      assert.equal(sent.length, count + 1);
+      assert.equal(sent.at(-1).text.body, TOO_LATE);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'gone']);
+      check('late taps');
+    }
+
+    {
+      const { sent, relay, ask, say, lastId } = await setup();
+      await ask('kh1', 'p1', question(colour));
+      const qid = lastId();
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p1', why: 'answered' });
+      assert.deepEqual(await say('x1', 'Blue', qid), []);
+      assert.equal(sent.at(-1).text.body, ALREADY);
+      const count = sent.length;
+      assert.deepEqual(await say('x2', 'Blue'), []);
+      assert.equal(sent.length, count);
+      check('a typed reply to a closed question gets the late reply; one without context is free');
+    }
+
+    {
+      const { store, sent, ask, tap, balance } = await setup([['kh1', N], ['kh2', N2]]);
+      const { ref } = await ask('kh1', 'p1', approval);
+      const b1 = await balance(N);
+      const b2 = await balance(N2);
+      const count = sent.length;
+      assert.deepEqual(await tap('t1', `${ref}:allow`, N2), []);
+      assert.deepEqual(await tap('t2', `${ref}:allow`, '27820000001'), []);
+      assert.equal(sent.length, count);
+      assert.equal(await balance(N), b1);
+      assert.equal(await balance(N2), b2);
+      assert.deepEqual(await stateOf(store, ref), ['open', null]);
+      check('a tap from a different number');
+    }
+
+    {
+      const { sent, relay, ask, tap } = await setup();
+      const { ref } = await ask('kh1', 'p1', approval);
+      await relay.machineMessage('kh1', { type: 'unlink' });
+      const count = sent.length;
+      assert.deepEqual(await tap('t1', `${ref}:allow`), []);
+      assert.equal(sent.length, count);
+      check('a tap after its machine is unlinked is ignored');
+    }
+
+    {
+      const { store, sent, ask, balance } = await setup();
+      const acc = await store.get('account:' + N);
+      acc.balance = price - 1;
+      await store.put('account:' + N, acc);
+      const count = sent.length;
+      const { r, ref } = await ask('kh1', 'p1', approval);
+      assert.deepEqual(r, [{ type: 'prompt-failed', pendingId: 'p1', reason: 'no-credit' }]);
+      assert.equal(sent.length, count);
+      assert.equal(await balance(), price - 1);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'send-failed']);
+      check('no credit');
+    }
+
+    {
+      const { store, sender, ask } = await setup();
+      sender.fail = true;
+      const { r, ref } = await ask('kh1', 'p1', approval);
+      assert.deepEqual(r, [{ type: 'prompt-failed', pendingId: 'p1', reason: 'send-failed' }]);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'send-failed']);
+      check('a refused send reports send-failed and closes the prompt');
+    }
+
+    {
+      const { store, sent, relay } = await setup([]);
+      await relay.hello('kx', { machine: 'x', version: '1' });
+      for (const kh of ['kx', 'nobody']) {
+        assert.deepEqual(await relay.machineMessage(kh, { type: 'prompt', pendingId: 'p1', expiresAt: T0 + 300000, prompt: approval }), [{ type: 'prompt-failed', pendingId: 'p1', reason: 'not-linked' }]);
+      }
+      assert.equal(sent.length, 0);
+      assert.equal((await store.list('prompt:')).size, 0);
+      assert.equal((await store.list('pending:')).size, 0);
+      check('not linked');
+    }
+
+    {
+      const { store, sender, ask, tap } = await setup();
+      const { ref } = await ask('kh1', 'p1', question(colour, size));
+      sender.fail = true;
+      assert.deepEqual(await tap('t1', `${ref}:q0:o0`), []);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'send-failed']);
+      check('a next question that cannot be sent closes the prompt');
+    }
+
+    {
+      const { store, relay, ask, balance, lastId } = await setup();
+      const before = await balance();
+      await ask('kh1', 'p1', approval);
+      const id = lastId();
+      assert.equal(await balance(), before - price);
+      const failed = { inbound: [], statuses: [{ id, status: 'failed', recipient: N }] };
+      assert.deepEqual(await relay.webhook(failed), []);
+      assert.equal(await balance(), before);
+      assert.equal((await store.get('msg:' + id)).refunded, true);
+      await relay.webhook(failed);
+      await relay.webhook({ inbound: [], statuses: [{ id, status: 'delivered', recipient: N }, { id: 'wamid.unknown', status: 'failed', recipient: N }] });
+      assert.equal(await balance(), before);
+      check('failed status refunds once');
+    }
+
+    {
+      const { clock, relay, ask, tap } = await setup();
+      const { ref } = await ask('kh1', 'p1', approval);
+      const [route] = await tap('t1', `${ref}:allow`);
+      await relay.queue(route.keyHash, route.msg, route.expiresAt);
+      const out = await relay.hello('kh1', { machine: 'kh1', version: '1' });
+      assert.equal(out[0].type, 'status');
+      assert.deepEqual(out.slice(1), [{ type: 'decide', pendingId: 'p1', decision: { behavior: 'allow' } }]);
+      const { ref: ref2 } = await ask('kh1', 'p2', approval, clock.t + 60000);
+      const [late] = await tap('t2', `${ref2}:allow`);
+      await relay.queue(late.keyHash, late.msg, late.expiresAt);
+      clock.t += 60001;
+      assert.deepEqual((await relay.hello('kh1', { machine: 'kh1', version: '1' })).slice(1), []);
+      check('decide is queued for an offline machine');
+    }
+  }
+
   console.log(`\n${passed} checks passed`);
 }
 
