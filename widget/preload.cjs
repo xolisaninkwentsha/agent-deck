@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('deck', {
   onApprovals: (fn) => ipcRenderer.on('approvals', (_e, enabled) => fn(enabled)), // changed from the tray
   resize: (height) => ipcRenderer.send('resize', height),
   trayState: (st) => ipcRenderer.send('tray-state', st), // idle | working | needs | error
+  openActivity: (p) => ipcRenderer.send('open-activity', p), // { hubUrl, token, key, title }: the subagents window
   setApprovals: (enabled) => ipcRenderer.send('set-approvals', enabled),
   saveSettings: (patch) => ipcRenderer.send('save-settings', patch),
   openLink: (url) => ipcRenderer.send('open-link', url), // main only opens http(s) links

@@ -1,4 +1,4 @@
-// Draw the tray and app icons from Bolt, the robot on the cards (BOLT_SVG in renderer.js, styled by
+// Draw the tray and app icons from Bolt, the robot on the cards (BOLT_SVG in shared.js, styled by
 // style.css), so they always match the panel. Dev only; the PNGs are committed. Run from the repo:
 //   node_modules/electron/dist/electron --ozone-platform=x11 widget/icons/make-icons.cjs
 const { app, BrowserWindow } = require('electron');
@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const WIDGET = path.join(__dirname, '..');
-const svg = /const BOLT_SVG = `([\s\S]*?)`;/.exec(fs.readFileSync(path.join(WIDGET, 'renderer.js'), 'utf8'))[1];
+const svg = /const BOLT_SVG = `([\s\S]*?)`;/.exec(fs.readFileSync(path.join(WIDGET, 'shared.js'), 'utf8'))[1];
 const css = fs.readFileSync(path.join(WIDGET, 'style.css'), 'utf8');
 
 // A still frame of one state, at `size` px, on a transparent background or a navy plate.

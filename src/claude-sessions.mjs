@@ -137,6 +137,7 @@ export function scanUsage(file, acc = newUsage()) {
 // What the panel shows: model, tokens, and the most-used tools.
 export const usageSummary = (acc) => ({
   model: acc.model, tokensIn: acc.input, tokensOut: acc.output,
+  toolCount: Object.values(acc.tools).reduce((n, x) => n + x, 0),
   tools: Object.entries(acc.tools).sort((a, b) => b[1] - a[1]).slice(0, 6),
 });
 

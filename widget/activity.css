@@ -1,0 +1,40 @@
+/* The activity window: one session and its subagents as an outline. Colours and Bolt come from
+   style.css (Blueprint); this only lays out the window. */
+body.activity { border: 0; border-radius: 0; display: flex; flex-direction: column; overflow: hidden; user-select: none; }
+#a-bar {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 14px;
+  border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 90%, transparent);
+}
+.a-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 200px; }
+#a-name { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#a-counts { display: flex; gap: 10px; font: 11px var(--mono); }
+.c-run { color: var(--accent); } .c-done { color: var(--background); } .c-stop { color: var(--stopped); }
+:root { --stopped: color-mix(in srgb, var(--approval) 55%, var(--muted)); }
+.pill { font: 600 11px system-ui, sans-serif; color: var(--muted); background: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; }
+.pill[aria-pressed="true"] { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+#a-tree { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 12px 16px; display: grid; align-content: start; grid-template-columns: minmax(0, 1fr); gap: 1px; }
+#a-tree::-webkit-scrollbar { width: 6px; }
+#a-tree::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.a-empty { color: var(--muted); padding: 18px 6px; text-align: center; }
+
+/* one outline row: connectors, Bolt, what it is, status; then a line of detail */
+.o-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; column-gap: 7px; align-items: center; padding: 4px 6px; border-radius: 5px; cursor: pointer; }
+.o-row:hover { background: var(--card-hi); }
+.o-row.sel { background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+.o-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.o-pre { font: 13px/1 var(--mono); color: var(--line); white-space: pre; }
+.o-row .m { width: 22px; height: 22px; }
+.o-what { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.o-what b { font-weight: 650; }
+.o-what .sep { color: var(--faint); }
+.o-sub { grid-column: 3 / 5; font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.st { font: 600 10.5px var(--mono); white-space: nowrap; }
+.st.running { color: var(--accent); } .st.done { color: var(--background); } .st.stopped { color: var(--stopped); }
+.st.needs { color: var(--approval); } .st.error { color: var(--error); } .st.idle { color: var(--idle); }
+
+/* the selected agent, opened in place */
+.o-detail { display: grid; gap: 6px; margin: 2px 0 8px 0; padding: 8px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 7px; font-size: 11.5px; min-width: 0; }
+.o-detail .meta-line { display: flex; flex-wrap: wrap; gap: 3px 12px; font: 10.5px var(--mono); color: var(--muted); }
+.o-detail .meta-line .model { color: var(--text); background: var(--plate); border-radius: 4px; padding: 0 5px; font-weight: 600; }
+.k-stop { --k: var(--stopped); }
+.o-detail .d-sec .d-head { color: color-mix(in srgb, var(--k, var(--muted)) 70%, var(--text)); }

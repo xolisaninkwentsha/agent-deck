@@ -345,11 +345,59 @@ async function main() {
   await hook('observe', { session_id: 'sess-use', cwd: '/work/use', transcript_path: USE, hook_event_name: 'SessionStart', source: 'startup' });
   const us = () => snap.sessions.find((x) => x.id === 'sess-use');
   await until(() => us()?.usage?.tokensIn === 3000, 'usage read from the transcript', 60);
-  assert.deepEqual(us().usage, { model: 'claude-opus-5-5', tokensIn: 3000, tokensOut: 45, tools: [['Bash', 2], ['Read', 1]] });
+  assert.deepEqual(us().usage, { model: 'claude-opus-5-5', tokensIn: 3000, tokensOut: 45, toolCount: 3, tools: [['Bash', 2], ['Read', 1]] });
   fs.appendFileSync(USE, asst('m3', { model: 'claude-sonnet-5-5', inTok: 500, out: 20, tools: [['t4', 'Edit'], ['t5', 'Edit'], ['t6', 'Edit']] }));
   await until(() => us()?.usage?.tokensOut === 65, 'picks up where it left off', 60);
-  assert.deepEqual(us().usage, { model: 'claude-sonnet-5-5', tokensIn: 3500, tokensOut: 65, tools: [['Edit', 3], ['Bash', 2], ['Read', 1]] });
+  assert.deepEqual(us().usage, { model: 'claude-sonnet-5-5', tokensIn: 3500, tokensOut: 65, toolCount: 6, tools: [['Edit', 3], ['Bash', 2], ['Read', 1]] });
   ok('card usage: model, tokens in/out and tool counts from the transcript, each message and call once, subagents left out');
+
+  // 9k3. The activity window: a session's subagents, from <session>/subagents/ next to its transcript.
+  const ACT = path.join(HOME, 'act'), ACT_T = path.join(ACT, 'sess-act.jsonl'), SUB = path.join(ACT, 'sess-act', 'subagents');
+  fs.mkdirSync(SUB, { recursive: true });
+  fs.writeFileSync(ACT_T, '');
+  const ago = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+  const jl = (o) => JSON.stringify(o) + '\n';
+  const toolLine = (id, name, input, msAgo) => jl({ type: 'assistant', isSidechain: true, timestamp: ago(msAgo),
+    message: { id: 'm-' + id, model: 'claude-sonnet-5-5', content: [{ type: 'tool_use', id, name, input }], usage: { input_tokens: 100, output_tokens: 10 } } });
+  const meta = (id, m) => fs.writeFileSync(path.join(SUB, `agent-${id}.meta.json`), JSON.stringify(m));
+  // a1 finished; a2 is running and started a fork (f1), which went quiet 10 minutes ago without finishing.
+  fs.writeFileSync(path.join(SUB, 'agent-a1.jsonl'), jl({ type: 'user', timestamp: ago(600000), message: { role: 'user', content: 'go' } })
+    + toolLine('t1', 'Bash', { command: 'npm test' }, 590000)
+    + jl({ type: 'assistant', isSidechain: true, timestamp: ago(580000), message: { id: 'm-end', model: 'claude-sonnet-5-5', content: [{ type: 'text', text: 'All 54 checks pass.' }], usage: { input_tokens: 50, output_tokens: 5 } } }));
+  meta('a1', { agentType: 'Explore', description: 'Run the tests', toolUseId: 'toolu_main1', spawnDepth: 1, finished: true, requestShape: 'background' });
+  fs.writeFileSync(path.join(SUB, 'agent-a2.jsonl'), toolLine('t2', 'Read', { file_path: '/work/x/a.js' }, 20000) + toolLine('toolu_fork', 'Agent', { description: 'Check CSS' }, 10000));
+  meta('a2', { agentType: 'general-purpose', description: 'Review the PR', toolUseId: 'toolu_main2', spawnDepth: 1, finished: false });
+  fs.writeFileSync(path.join(SUB, 'agent-f1.jsonl'), toolLine('t3', 'Grep', { pattern: 'grid' }, 600000));
+  meta('f1', { agentType: 'fork', description: 'Check CSS', toolUseId: 'toolu_fork', spawnDepth: 2, finished: false });
+  const tenMinAgo = new Date(Date.now() - 10 * 60000);
+  fs.utimesSync(path.join(SUB, 'agent-f1.jsonl'), tenMinAgo, tenMinAgo);
+  await hook('observe', { session_id: 'sess-act', cwd: '/work/act', transcript_path: ACT_T, hook_event_name: 'SessionStart', source: 'startup' });
+  await until((m) => m.sessions.some((x) => x.id === 'sess-act'), 'activity session');
+  const actKey = snap.sessions.find((x) => x.id === 'sess-act').key;
+  const aw = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+  const acts = [];
+  let watching = false, snapshotsAfterWatch = 0;
+  // Every connection gets one welcome snapshot; after the first activity message, none should follow.
+  aw.on('message', (d) => { const m = JSON.parse(String(d)); if (m.type === 'activity') { acts.push(m); watching = true; } else if (watching && m.type === 'snapshot') snapshotsAfterWatch++; });
+  await new Promise((r) => aw.on('open', r));
+  aw.send(JSON.stringify({ type: 'watch-activity', key: actKey }));
+  const waitFor = async (pred, label) => { for (let i = 0; i < 80; i++) { if (pred()) return; await sleep(100); } throw new Error('timed out: ' + label); };
+  const sub = (id) => acts.at(-1)?.agents.find((x) => x.id === id);
+  await waitFor(() => acts.at(-1)?.agents.length === 3, 'three subagents');
+  assert.equal(acts.at(-1).main.project, 'act');
+  assert.deepEqual(['a1', 'a2', 'f1'].map((id) => sub(id).parent), ['main', 'main', 'a2'], 'the fork hangs off the agent that started it');
+  assert.deepEqual(['a1', 'a2', 'f1'].map((id) => sub(id).status), ['done', 'running', 'stopped'], 'unfinished and quiet for 10 minutes = stopped');
+  assert.deepEqual([sub('a1').type, sub('a1').description, sub('a1').lastText, sub('a1').background], ['Explore', 'Run the tests', 'All 54 checks pass.', true]);
+  assert.deepEqual([sub('a1').tokensIn, sub('a1').tokensOut, sub('a1').toolCount], [150, 15, 1]);
+  assert.deepEqual(sub('a2').steps.map((x) => x.text), ['Subagent: Check CSS', 'Reading a.js'], 'newest step first');
+  fs.appendFileSync(path.join(SUB, 'agent-a2.jsonl'), toolLine('t4', 'Bash', { command: 'npm run lint' }, 0));
+  await waitFor(() => sub('a2')?.toolCount === 3, 'new work is pushed to the window');
+  assert.equal(sub('a2').step, 'Running: npm run lint');
+  meta('a2', { agentType: 'general-purpose', description: 'Review the PR', toolUseId: 'toolu_main2', spawnDepth: 1, finished: true });
+  await waitFor(() => sub('a2')?.status === 'done', 'finished');
+  assert.equal(snapshotsAfterWatch, 0, 'an activity window gets no session snapshots');
+  aw.close();
+  ok('activity window: subagents from the session folder, linked parent to child, running/done/stopped, live updates');
 
   // 9l. The panel's settings change holdSeconds in config.json; the daemon picks it up live.
   const cfgFile = path.join(HOME, 'config.json');
