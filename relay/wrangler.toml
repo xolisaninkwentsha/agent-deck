@@ -1,0 +1,14 @@
+# Agent Deck's phone-approvals relay: one Worker and one SQLite-backed Durable Object.
+# Secrets and operator values are set with `npx wrangler secret put <NAME>`, never in this file.
+# See README.md.
+name = "agent-deck-relay"
+main = "src/worker.js"
+compatibility_date = "2026-11-20"
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelayDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayDO"]

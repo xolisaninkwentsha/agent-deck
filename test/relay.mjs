@@ -5,6 +5,7 @@ import { MemoryStore } from '../relay/src/memory-store.js';
 import { CODE_ALPHABET, newCode, findCode, newRef, sha256Hex, normalizeNumber, maskNumber } from '../relay/src/ids.js';
 import { priceFor, reserve, release } from '../relay/src/credit.js';
 import { createRelay } from '../relay/src/core.js';
+import { parseEnv } from '../relay/src/env.js';
 
 let passed = 0;
 const check = (name) => { passed++; console.log(`  ✓ ${name}`); };
@@ -852,6 +853,147 @@ async function main() {
       assert.equal(sent.length, count + 1);
       check('a repeated prompt for a pendingId still open or deciding is not sent or charged again');
     }
+
+    // sweep: what the Durable Object's alarm runs every 10 minutes
+    const H = 3600000;
+    const D = 86400000;
+    {
+      const { store, sent, clock, relay, ask, tap } = await setup();
+      const { ref: old } = await ask('kh1', 'p1', question(colour), clock.t + 300000);
+      clock.t += 300001;
+      const { ref: fresh } = await ask('kh1', 'p2', approval);
+      const freshBefore = await store.get('prompt:' + fresh);
+      assert.deepEqual(await relay.sweep(), { closed: 1, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 0 });
+      const swept = await store.get('prompt:' + old);
+      assert.deepEqual([swept.state, swept.closedWhy, swept.closedAt], ['closed', 'timeout', clock.t]);
+      assert.deepEqual(swept.prompt, { kind: 'question' });
+      assert.deepEqual(swept.answers, {});
+      assert.deepEqual(await store.get('prompt:' + fresh), freshBefore);
+      assert.equal(await store.get('pending:kh1:p1'), old);
+      await tap('s1', `${old}:q0:o0`);
+      assert.equal(sent.at(-1).text.body, TOO_LATE);
+      check('sweep closes and strips an expired open question, and leaves a fresh prompt alone');
+
+      assert.equal((await tap('s2', `${fresh}:allow`)).length, 1);
+      clock.t += H; // the old prompt closed exactly an hour ago; the deciding one has expired
+      await relay.sweep();
+      assert.ok(await store.get('prompt:' + old));
+      assert.deepEqual(await stateOf(store, fresh), ['closed', 'timeout']);
+      assert.deepEqual((await store.get('prompt:' + fresh)).prompt, { kind: 'approval' });
+      clock.t += 1;
+      assert.equal((await relay.sweep()).prompts, 1);
+      assert.equal(await store.get('prompt:' + old), undefined);
+      assert.equal(await store.get('pending:kh1:p1'), undefined);
+      assert.ok(await store.get('prompt:' + fresh));
+      assert.equal(await store.get('pending:kh1:p2'), fresh);
+      // a pendingId sent afresh keeps its pending key when the old record goes
+      const { ref: first } = await ask('kh1', 'p3', approval);
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p3', why: 'answered' });
+      clock.t += H + 1;
+      const { ref: second } = await ask('kh1', 'p3', approval);
+      assert.notEqual(second, first);
+      await relay.sweep();
+      assert.equal(await store.get('prompt:' + first), undefined);
+      assert.equal(await store.get('pending:kh1:p3'), second);
+      assert.equal((await store.get('prompt:' + second)).state, 'open');
+      check('sweep times out a deciding prompt, and deletes closed prompts and their pending keys an hour later');
+    }
+
+    {
+      const { store, clock, relay, say } = await setup(); // links kh1: seen:link0 and one msg: record at T0
+      const keys = async (prefix) => [...(await store.list(prefix)).keys()];
+      const [lc] = await relay.machineMessage('kh1', { type: 'link-start', number: N2 });
+      await relay.queue('kq', { type: 'a' }, T0 + 1000);
+      await relay.queue('kq', { type: 'b' });
+      await relay.queue('kq', { type: 'c' }, T0 + 2000);
+      await relay.queue('kz', { type: 'd' }, T0 + 1000);
+      clock.t = T0 + 1000;
+      assert.deepEqual(await relay.sweep(), { closed: 0, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 2 });
+      assert.deepEqual((await store.get('outbox:kq')).map((e) => e.msg.type), ['b', 'c']);
+      assert.equal(await store.get('outbox:kz'), undefined);
+      assert.ok(await store.get('code:' + lc.code));
+      clock.t = T0 + 600000;
+      assert.equal((await relay.sweep()).codes, 1);
+      assert.equal(await store.get('code:' + lc.code), undefined);
+      assert.deepEqual((await store.get('outbox:kq')).map((e) => e.msg.type), ['b']);
+      check('sweep drops expired outbox entries (and empty outboxes) and expired link codes');
+
+      clock.t = T0 + D / 2;
+      await say('later', 'hello', undefined, N2);
+      await relay.sendAndSave(N, textMessage(N, 'later'));
+      clock.t = T0 + D;
+      await relay.sweep();
+      assert.deepEqual(await keys('seen:'), ['seen:later', 'seen:link0']);
+      clock.t = T0 + D + 1;
+      assert.equal((await relay.sweep()).seen, 1);
+      assert.deepEqual(await keys('seen:'), ['seen:later']);
+      assert.equal((await keys('msg:')).length, 2);
+      clock.t = T0 + 7 * D + 1;
+      const counts = await relay.sweep();
+      assert.equal(counts.msgs, 1);
+      assert.equal(counts.seen, 1);
+      assert.deepEqual(await keys('seen:'), []);
+      assert.deepEqual([...(await store.list('msg:')).values()].map((m) => m.at), [T0 + D / 2]);
+      check('sweep deletes seen ids after a day and message records after 7 days');
+    }
+  }
+
+  // parseEnv: the Worker's variables and secrets → the relay config
+  {
+    const base = { GRAPH_VERSION: 'v21.0', WA_TOKEN: 'tok', WA_PHONE_NUMBER_ID: '1234', WA_APP_SECRET: 'sec', WA_VERIFY_TOKEN: 'vt', BOT_NUMBER: '+27 60 000 0000' };
+    const throwsNaming = (env, name) => assert.throws(() => parseEnv(env), (e) => e instanceof Error && e.message.includes(name), name);
+
+    assert.deepEqual(parseEnv(base), {
+      botNumber: '27600000000',
+      billing: 'off',
+      trialMicroUsd: 0,
+      rates: { default: 0 },
+      markupPercent: 0,
+      hourlyCap: 60,
+      codeTtlMs: 600000,
+      windowMs: 86400000,
+      template: { name: 'agent_deck_needs_you', lang: 'en' },
+      whatsapp: { token: 'tok', phoneNumberId: '1234', appSecret: 'sec', verifyToken: 'vt', graphVersion: 'v21.0' },
+    });
+    const blank = { BILLING: '', TRIAL_MICRO_USD: '', RATES_JSON: '', MARKUP_PERCENT: '', HOURLY_CAP: '', TEMPLATE_NAME: '', TEMPLATE_LANG: '' };
+    assert.deepEqual(parseEnv({ ...base, ...blank }), parseEnv(base));
+    assert.equal(parseEnv({ ...base, WA_TOKEN: 'tok\n' }).whatsapp.token, 'tok');
+    check('parseEnv defaults: billing off, no trial, zero rates, cap 60, the agent_deck_needs_you template');
+
+    throwsNaming({}, 'GRAPH_VERSION');
+    for (const name of ['GRAPH_VERSION', 'WA_TOKEN', 'WA_PHONE_NUMBER_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN', 'BOT_NUMBER']) {
+      const env = { ...base };
+      delete env[name];
+      throwsNaming(env, name);
+      throwsNaming({ ...base, [name]: '  ' }, name);
+    }
+    throwsNaming({ ...base, BOT_NUMBER: '0821234567' }, 'BOT_NUMBER');
+    check('parseEnv throws naming a missing GRAPH_VERSION, WA_* secret or BOT_NUMBER');
+
+    const full = parseEnv({ ...base, BILLING: 'trial', TRIAL_MICRO_USD: '500000', RATES_JSON: '{"default":9000,"27":5000}', MARKUP_PERCENT: '20', HOURLY_CAP: 30, TEMPLATE_NAME: 'mine', TEMPLATE_LANG: 'en_US' });
+    assert.equal(full.billing, 'trial');
+    assert.equal(full.trialMicroUsd, 500000);
+    assert.deepEqual(full.rates, { default: 9000, '27': 5000 });
+    assert.equal(full.markupPercent, 20);
+    assert.equal(full.hourlyCap, 30);
+    assert.deepEqual(full.template, { name: 'mine', lang: 'en_US' });
+    assert.equal(parseEnv({ ...base, BILLING: 'on' }).billing, 'on');
+    assert.equal(priceFor('27821234567', full), 6000);
+    assert.equal(priceFor('447000000000', full), 10800);
+    assert.equal(priceFor('27821234567', parseEnv({ ...base, BILLING: 'trial' })), 0);
+    check('parseEnv reads RATES_JSON, BILLING, trial, markup, cap and template, so priceFor is always a number');
+
+    for (const bad of ['nope', '[1]', 'null', '5', '{}', '{"default":-1}', '{"default":"9000"}', '{"default":null}', '{"default":1e999}', '{"default":1,"27":"x"}', '{"default":1,"27":-5}']) {
+      throwsNaming({ ...base, RATES_JSON: bad }, 'RATES_JSON');
+    }
+    for (const bad of ['yes', 'ON', 'true']) throwsNaming({ ...base, BILLING: bad }, 'BILLING');
+    for (const name of ['TRIAL_MICRO_USD', 'MARKUP_PERCENT', 'HOURLY_CAP']) {
+      for (const bad of ['abc', '-1', 'Infinity', 'NaN']) throwsNaming({ ...base, [name]: bad }, name);
+    }
+    for (const env of [{ ...base, RATES_JSON: '{"default":"s3cr3t"' }, { ...base, RATES_JSON: '{"default":"s3cr3t"}' }, { ...base, BILLING: 's3cr3t' }, { ...base, HOURLY_CAP: 's3cr3t' }]) {
+      assert.throws(() => parseEnv(env), (e) => !e.message.includes('s3cr3t'));
+    }
+    check('parseEnv rejects bad RATES_JSON, BILLING and numbers, naming the variable but never its value');
   }
 
   console.log(`\n${passed} checks passed`);

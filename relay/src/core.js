@@ -5,6 +5,8 @@ import { newCode, findCode, newRef, normalizeNumber, maskNumber } from './ids.js
 import { priceFor, reserve, release } from './credit.js';
 
 const HOUR_MS = 3600000;
+const DAY_MS = 86400000;
+const MSG_KEEP_MS = 7 * DAY_MS; // long enough for Meta's "failed" statuses and reply context
 const MAX_LINK_ATTEMPTS = 5;
 const MAX_PROMPT_MS = 600000; // Claude Code's hook timeout
 const WINDOW_MARGIN_MS = 300000; // under 5 min left in the 24 h window → template
@@ -384,5 +386,52 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     return routes;
   }
 
-  return { hello, machineMessage, webhook, queue, statusMsg, sendAndSave };
+  // ---- clean-up (the Durable Object's alarm) ----
+
+  // Expired prompts are closed, which strips their text. Closed ones stay an hour so late taps still
+  // get "Too late", then go with their pending key, unless a newer prompt has taken that key over.
+  // Returns counts only, for the log.
+  async function sweep(nowMs = now()) {
+    const counts = { closed: 0, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 0 };
+    for (const p of (await store.list('prompt:')).values()) {
+      if ((p.state === 'open' || p.state === 'deciding') && p.expiresAt < nowMs) {
+        await close(p, 'timeout');
+        counts.closed++;
+      } else if (p.state === 'closed' && p.closedAt < nowMs - HOUR_MS) {
+        await store.delete(promptKey(p.ref));
+        const pk = pendingKey(p.keyHash, p.pendingId);
+        if ((await store.get(pk)) === p.ref) await store.delete(pk);
+        counts.prompts++;
+      }
+    }
+    for (const [key, rec] of await store.list('code:')) {
+      if (!rec || !(rec.expiresAt > nowMs)) {
+        await store.delete(key);
+        counts.codes++;
+      }
+    }
+    for (const [key, at] of await store.list('seen:')) {
+      if (!(at >= nowMs - DAY_MS)) {
+        await store.delete(key);
+        counts.seen++;
+      }
+    }
+    for (const [key, rec] of await store.list('msg:')) {
+      if (!rec || !(rec.at >= nowMs - MSG_KEEP_MS)) {
+        await store.delete(key);
+        counts.msgs++;
+      }
+    }
+    for (const [key, box] of await store.list('outbox:')) {
+      const list = Array.isArray(box) ? box : [];
+      const keep = list.filter((e) => e && (e.expiresAt === null || e.expiresAt === undefined || e.expiresAt > nowMs));
+      if (keep.length === list.length && list.length) continue;
+      counts.outbox += list.length - keep.length;
+      if (keep.length) await store.put(key, keep);
+      else await store.delete(key);
+    }
+    return counts;
+  }
+
+  return { hello, machineMessage, webhook, queue, statusMsg, sendAndSave, sweep };
 }
