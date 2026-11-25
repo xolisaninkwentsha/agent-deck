@@ -1,8 +1,9 @@
 // Agent Deck panel: a small frameless window that stays on top of everything.
-const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut, nativeTheme, shell, clipboard } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
 // Ubuntu's default Wayland session doesn't let apps keep themselves on top.
@@ -228,10 +229,23 @@ async function createWindow() {
   });
 }
 
+// When this machine is shared ("agent-deck share"): its address for other machines, and the line
+// to paste into their panel (it holds the token, so only main copies it; the page never sees it).
+function shareAddress(cfg) {
+  if (config.isLoopback(cfg.bind) || !cfg.token) return null;
+  let host = cfg.bind;
+  if (host === '0.0.0.0' || host === '::') {
+    const v4 = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal).map((a) => a.address);
+    host = v4.find((a) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a)) || v4[0] || '<this-machine-ip>'; // Tailscale first
+  }
+  return `ws://${host.includes(':') ? `[${host}]` : host}:${cfg.port}`;
+}
+const shareLine = (cfg) => { const at = shareAddress(cfg); return at && `agent-deck add-hub ${config.machineName(cfg)} ${at} ${cfg.token}`; };
+
 function rendererConfig() {
   const cfg = config.loadConfig();
   return {
-    hubs: hubsFor(cfg), approvalsInWidget: cfg.approvalsInWidget !== false, platform: process.platform,
+    hubs: hubsFor(cfg), shareAddress: shareAddress(cfg), approvalsInWidget: cfg.approvalsInWidget !== false, platform: process.platform,
     notifyAfterSeconds: Number(cfg.notifyAfterSeconds) || 30, holdSeconds: Number(cfg.holdSeconds) || 300,
     notifications: cfg.notifications !== false, contextWarnPercent: Number(cfg.contextWarnPercent) || 80,
     theme: cfg.theme || 'system', shortcut: cfg.shortcut || '', shortcutVia: cfg.shortcutVia || null,
@@ -264,6 +278,16 @@ ipcMain.on('save-settings', (_e, patch) => {
 });
 
 ipcMain.handle('config', () => rendererConfig());
+
+// Other machines, from the settings view. config.addHub validates (same as "agent-deck add-hub").
+const configChanged = () => { if (win && !win.isDestroyed()) win.webContents.send('config-changed', rendererConfig()); };
+ipcMain.handle('add-hub', (_e, { name, address, token } = {}) => {
+  const r = config.addHub(name, address, token);
+  if (r.ok) configChanged();
+  return { ok: r.ok, error: r.error || null };
+});
+ipcMain.on('remove-hub', (_e, name) => { config.removeHub(String(name || '')); configChanged(); });
+ipcMain.on('copy-share-line', () => { const line = shareLine(config.loadConfig()); if (line) clipboard.writeText(line); });
 
 ipcMain.on('resize', (_e, height) => {
   if (!win || win.isDestroyed()) return;

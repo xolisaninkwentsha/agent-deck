@@ -31,6 +31,7 @@ const state = {
   notifyAfter: 30,     // seconds of work before "Done, your turn" is worth a notification
   settingsOpen: false,
   cfg: {},             // panel settings from the main process (rendererConfig in main.cjs)
+  hubDraft: { name: '', address: '', token: '', error: '' }, // the "Add a machine" form
 };
 
 // ---------- settings ----------
@@ -74,7 +75,55 @@ function settingsView() {
     row('Context warning at', null, select(c.contextWarnPercent, [[70, '70%'], [80, '80%'], [90, '90%']], (v) => saveSetting({ contextWarnPercent: v }), '%')),
     row('Theme', null, select(c.theme || 'system', [['system', 'System'], ['dark', 'Dark'], ['light', 'Light']], (v) => saveSetting({ theme: v }))),
     row('Show/hide shortcut', linuxNoGnome ? 'Run "agent-deck shortcut" so it works in every app' : null,
-      h('span', { class: 'set-value', text: c.shortcut ? prettyKey(c.shortcut) + (c.shortcutVia === 'gnome' ? ' (GNOME)' : '') : 'none' })));
+      h('span', { class: 'set-value', text: c.shortcut ? prettyKey(c.shortcut) + (c.shortcutVia === 'gnome' ? ' (GNOME)' : '') : 'none' })),
+    ...machinesView(row));
+}
+
+// Other machines whose sessions and agents this panel shows ("hubs"), and how to share this one.
+// The typed form lives in state.hubDraft, so a settings rebuild doesn't lose it.
+const ADD_HUB_LINE = /^\s*(?:agent-deck\s+add-hub\s+)?([A-Za-z0-9._-]+)\s+(wss?:\/\/\S+)\s+(\S+)\s*$/;
+function machinesView(row) {
+  const d = state.hubDraft;
+  const field = (key, placeholder) => h('input', {
+    class: 'set-input', 'data-field': key, placeholder, value: d[key], spellcheck: 'false', autocomplete: 'off',
+    oninput: (e) => {
+      const line = ADD_HUB_LINE.exec(e.target.value); // the whole line from "agent-deck share" pasted anywhere
+      if (line) {
+        [d.name, d.address, d.token] = line.slice(1);
+        for (const k of ['name', 'address', 'token']) document.querySelector(`.set-input[data-field="${k}"]`).value = d[k];
+      } else d[key] = e.target.value;
+    },
+    onkeydown: (e) => { if (e.key === 'Enter') addMachine(); },
+  });
+  const remotes = state.hubs.filter((x) => !x.local);
+  const shared = state.cfg.shareAddress;
+  return [
+    h('div', { class: 'section-head', text: 'Other machines' }),
+    ...remotes.map((x) => row(x.name, `${x.url.replace(/\/ws$/, '')} · ${x.connected ? 'connected' : 'not connected'}`,
+      h('button', { class: 'btn ghost', text: 'Remove', onclick: () => window.deck.removeHub(x.name) }))),
+    h('div', { class: 'set-row add-hub' },
+      h('div', { class: 'set-label' },
+        h('div', { text: 'Add a machine' }),
+        h('div', { class: 'set-hint', text: 'Paste the line "agent-deck share" printed on it, or fill in its name, address and token.' }),
+        h('div', { class: 'add-fields' }, field('name', 'name'), field('address', 'address, e.g. 100.101.102.103'), field('token', 'token')),
+        d.error ? h('div', { class: 'set-error', text: d.error }) : null),
+      h('button', { class: 'btn allow', text: 'Add', onclick: addMachine })),
+    row('This machine', shared ? `Shared on ${shared}. Copy the line and paste it into the other panel.` : 'Not shared. Run "agent-deck share <Tailscale IP>" to let another panel see it.',
+      shared ? h('button', { class: 'btn', text: d.copied ? 'Copied' : 'Copy line', onclick: () => copied(true) }) : null),
+  ];
+}
+function copied(yes) {
+  if (yes) { window.deck.copyShareLine(); setTimeout(() => copied(false), 2000); }
+  state.hubDraft.copied = yes;
+  state.settingsDirty = true;
+  render();
+}
+async function addMachine() {
+  const d = state.hubDraft;
+  const r = await window.deck.addHub(d.name, d.address, d.token);
+  state.hubDraft = r.ok ? { name: '', address: '', token: '', error: '' } : { ...d, error: r.error };
+  state.settingsDirty = true;
+  render();
 }
 
 // ---------- tiny DOM helper ----------
@@ -108,6 +157,7 @@ function connect(hub) {
   hub.ws = ws;
   ws.onopen = () => {
     hub.connected = true; hub.retry = 0;
+    state.settingsDirty = true; // "connected" in Settings → Other machines
     ws.send(JSON.stringify({ type: 'hello', approvals: state.approvals }));
     render();
   };
@@ -124,6 +174,7 @@ function connect(hub) {
     }
   };
   ws.onclose = () => {
+    if (hub.connected) state.settingsDirty = true;
     hub.connected = false; hub.sessions = []; hub.agents = []; hub.primed = false;
     render();
     if (!hub.removed) scheduleReconnect(hub);
@@ -474,7 +525,8 @@ function render() {
   // Only an in-progress IME composition defers the rebuild (compositionend re-renders).
   const focused = document.activeElement;
   const focusKey = focused && focused.classList.contains('other') ? focused.dataset.key : null;
-  const caret = focusKey ? [focused.selectionStart, focused.selectionEnd] : null;
+  const focusField = focused && focused.classList.contains('set-input') ? focused.dataset.field : null;
+  const caret = focusKey || focusField ? [focused.selectionStart, focused.selectionEnd] : null;
   const items = allSessions();
   const active = items.filter((x) => x.s.status !== 'ended');
   const agentItems = allAgents();
@@ -505,7 +557,11 @@ function render() {
     list.hidden = state.collapsed;
     if (state.settingsOpen) {
       // Rebuild only when a setting changed: a snapshot re-render would close an open dropdown.
-      if (state.settingsDirty || !list.querySelector('.settings')) list.replaceChildren(settingsView());
+      if (state.settingsDirty || !list.querySelector('.settings')) {
+        list.replaceChildren(settingsView());
+        const again = focusField && list.querySelector(`.set-input[data-field="${focusField}"]`);
+        if (again) { again.focus(); try { again.setSelectionRange(caret[0], caret[1]); } catch {} }
+      }
       state.settingsDirty = false;
     } else {
       const anyConnected = state.hubs.some((x) => x.connected);

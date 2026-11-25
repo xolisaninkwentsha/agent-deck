@@ -92,6 +92,37 @@ export function newToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
+// ---------- other machines' daemons ("hubs"), for `agent-deck add-hub` and the panel's settings ----------
+// Address: "100.101.102.103", "host:47615", "ws://host:47615" or "wss://…"; the port defaults to 47615.
+export function hubUrl(input) {
+  let s = String(input || '').trim();
+  if (!s || /\s/.test(s)) return null;
+  if (!/^[a-z]+:\/\//i.test(s)) s = 'ws://' + s;
+  let u;
+  try { u = new URL(s); } catch { return null; }
+  if ((u.protocol !== 'ws:' && u.protocol !== 'wss:') || !u.hostname || u.username || u.password || u.search || u.hash) return null;
+  if (u.pathname !== '/' && u.pathname !== '/ws') return null;
+  return `${u.protocol}//${u.hostname}:${u.port || DEFAULTS.port}`; // hostname keeps IPv6 brackets
+}
+// Returns { ok, hubs } or { ok: false, error } in words the panel can show.
+export function addHub(name, address, token) {
+  name = String(name || '').trim();
+  token = String(token || '').trim();
+  if (!/^[A-Za-z0-9._-]{1,40}$/.test(name)) return { ok: false, error: 'Name: letters, digits, dot, dash or underscore' };
+  const url = hubUrl(address);
+  if (!url) return { ok: false, error: 'Address: an IP or host name, optionally with :port (or ws://host:port)' };
+  if (token && !/^[A-Za-z0-9._~+/=-]{8,200}$/.test(token)) return { ok: false, error: 'Token: paste it exactly as "agent-deck share" printed it' };
+  const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name);
+  hubs.push({ name, url, token: token || null });
+  saveConfig({ hubs });
+  return { ok: true, hubs };
+}
+export function removeHub(name) {
+  const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name);
+  saveConfig({ hubs });
+  return { ok: true, hubs };
+}
+
 export function tokensMatch(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const ab = Buffer.from(a), bb = Buffer.from(b);

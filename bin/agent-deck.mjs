@@ -9,7 +9,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
-  loadConfig, saveConfig, newToken, machineName, HOME, PID_PATH, LOG_PATH, CONFIG_PATH, ensureHome,
+  loadConfig, saveConfig, newToken, machineName, HOME, PID_PATH, LOG_PATH, CONFIG_PATH, ensureHome, addHub, removeHub,
 } from '../src/config.mjs';
 import { install, uninstall, isInstalled, settingsPath } from '../src/install.mjs';
 
@@ -185,16 +185,15 @@ const commands = {
 
   async 'add-hub'() {
     const [name, url, token] = args;
-    if (!name || !url) { console.log('Usage: agent-deck add-hub <name> <ws://host:port> <token>'); process.exit(1); }
-    const hubs = (cfg.hubs || []).filter((h) => h.name !== name);
-    hubs.push({ name, url, token: token || null });
-    saveConfig({ hubs });
-    console.log(`Added "${name}". The panel picks it up within a few seconds.`);
+    if (!name || !url) { console.log('Usage: agent-deck add-hub <name> <ws://host:port> <token>   (or add it in the panel: Settings)'); process.exit(1); }
+    const r = addHub(name, url, token);
+    if (!r.ok) { console.log(r.error); process.exit(1); }
+    console.log(`Added "${name}" (${r.hubs.at(-1).url}). The panel picks it up within a few seconds.`);
   },
 
   async 'remove-hub'() {
     const [name] = args;
-    saveConfig({ hubs: (cfg.hubs || []).filter((h) => h.name !== name) });
+    removeHub(name);
     console.log(`Removed "${name}".`);
   },
 

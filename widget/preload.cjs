@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld('deck', {
   setApprovals: (enabled) => ipcRenderer.send('set-approvals', enabled),
   saveSettings: (patch) => ipcRenderer.send('save-settings', patch),
   openLink: (url) => ipcRenderer.send('open-link', url), // main only opens http(s) links
+  addHub: (name, address, token) => ipcRenderer.invoke('add-hub', { name, address, token }), // validated in main
+  removeHub: (name) => ipcRenderer.send('remove-hub', name),
+  copyShareLine: () => ipcRenderer.send('copy-share-line'),
   notify: (title, body, target) => ipcRenderer.send('notify', { title, body, target }),
   onJump: (fn) => ipcRenderer.on('jump', (_e, target) => fn(target)), // a notification was clicked
   quit: () => ipcRenderer.send('quit'),

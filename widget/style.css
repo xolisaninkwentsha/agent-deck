@@ -201,6 +201,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .set-label { flex: 1; min-width: 0; }
 .set-hint { color: var(--muted); font-size: 10.5px; margin-top: 1px; }
 .set-value { color: var(--muted); font-size: 11.5px; }
+.add-hub { align-items: flex-end; }
+.add-fields { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.set-input {
+  width: 100%; background: var(--well); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 7px; font: inherit; font-size: 11.5px; user-select: text;
+}
+.set-input:focus { outline: none; border-color: var(--question); }
+.set-input::placeholder { color: var(--faint); }
+.set-error { color: var(--error); font-size: 10.5px; margin-top: 4px; }
 .set-select {
   font: inherit; font-size: 11.5px; color: var(--text); background: var(--btn); border: 1px solid var(--line);
   border-radius: 6px; padding: 2px 4px;

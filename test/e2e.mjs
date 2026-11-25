@@ -1,6 +1,6 @@
 // End-to-end test: real hook script -> real daemon -> fake widget over WebSocket.
 // Runs in a throwaway AGENT_DECK_HOME on a spare port.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -670,6 +670,25 @@ async function main() {
   assert.equal(results.filter((x) => x.ok).length, 100 - already);
   assert.equal((await agentPost({ agent: 'one-too-many', event: 'heartbeat' })).error, 'too many agents');
   ok('agents are capped at 100');
+
+  // 9s. Other machines ("hubs"): the CLI and the panel's Settings both go through config.addHub.
+  const cli = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'bin', 'agent-deck.mjs'), ...a], { env, encoding: 'utf8' });
+  const hubsNow = () => JSON.parse(fs.readFileSync(path.join(HOME, 'config.json'), 'utf8')).hubs;
+  assert.equal(cli('add-hub', 'ubuntu', '100.101.102.103', 'tok_ABCdef-12345').status, 0);
+  assert.equal(cli('add-hub', 'mac', 'ws://mac.tail.ts.net:47700/ws', 'tok_ABCdef-12345').status, 0);
+  assert.equal(cli('add-hub', 'ubuntu', '100.101.102.104:47615', 'tok_ABCdef-67890').status, 0); // same name replaces
+  assert.deepEqual(hubsNow(), [
+    { name: 'mac', url: 'ws://mac.tail.ts.net:47700', token: 'tok_ABCdef-12345' },
+    { name: 'ubuntu', url: 'ws://100.101.102.104:47615', token: 'tok_ABCdef-67890' }]);
+  for (const bad of [['bad name', '100.1.2.3', 'tok_ABCdef-12345'], ['x', 'http://100.1.2.3', 'tok_ABCdef-12345'], ['x', 'ws://h:1/other', 'tok_ABCdef-12345'],
+    ['x', 'ws://h?token=1', 'tok_ABCdef-12345'], ['x', '100.1.2.3', 'tok<script>x']]) {
+    const r = cli('add-hub', ...bad);
+    assert.equal(r.status, 1, `refused: ${bad.join(' ')}`);
+  }
+  assert.equal(hubsNow().length, 2, 'refused entries change nothing');
+  cli('remove-hub', 'ubuntu'); cli('remove-hub', 'mac');
+  assert.deepEqual(hubsNow(), []);
+  ok('other machines: addresses normalised (bare IP → ws://IP:47615), bad names, schemes, paths and tokens refused');
 
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));
