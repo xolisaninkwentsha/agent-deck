@@ -23,6 +23,7 @@ const state = {
   expanded: new Set(), // session keys with details open
   seenPending: new Set(),
   drafts: {},          // pendingId -> { answers: {question: [labels]}, other: {question: text} }
+  composing: false,    // an input method (IME) is composing text in an answer box
 };
 
 // ---------- tiny DOM helper ----------
@@ -186,8 +187,11 @@ function questionBox(hub, s, p) {
       })),
       h('input', {
         class: 'other', placeholder: 'Or type an answer…', value: draft.other[q.question] || '',
+        'data-key': `${p.id}|${q.question}`,
         oninput: (e) => { draft.other[q.question] = e.target.value; },
-        onkeydown: (e) => { if (e.key === 'Enter' && complete()) submit(); },
+        onkeydown: (e) => { if (e.key === 'Enter' && !e.isComposing && complete()) submit(); },
+        oncompositionstart: () => { state.composing = true; },
+        oncompositionend: () => { state.composing = false; render(); },
       }))),
     h('div', { class: 'btns' },
       single ? null : h('button', { class: 'btn allow', text: 'Send', onclick: () => complete() && submit() }),
@@ -240,8 +244,12 @@ function card({ hub, s }) {
 }
 
 function render() {
-  // Don't rebuild while someone is typing an answer.
-  const typing = document.activeElement && document.activeElement.classList.contains('other');
+  // Rebuilding the list replaces the answer boxes. Typed text survives in state.drafts;
+  // remember which box had focus (and the caret) so it can be put back afterwards.
+  // Only an in-progress IME composition defers the rebuild (compositionend re-renders).
+  const focused = document.activeElement;
+  const focusKey = focused && focused.classList.contains('other') ? focused.dataset.key : null;
+  const caret = focusKey ? [focused.selectionStart, focused.selectionEnd] : null;
   const items = allSessions();
   const active = items.filter((x) => x.s.status !== 'ended');
   const needs = items.filter((x) => x.s.pending || x.s.status === 'approval' || x.s.status === 'question').length;
@@ -258,7 +266,7 @@ function render() {
   const dots = document.getElementById('dots');
   dots.replaceChildren(...(state.collapsed ? items.map(({ s }) => h('span', { class: `mini st-${s.status}`, title: `${s.project}: ${s.step}` })) : []));
 
-  if (!typing) {
+  if (!state.composing) {
     const list = document.getElementById('list');
     list.hidden = state.collapsed;
     if (!items.length) {
@@ -269,6 +277,9 @@ function render() {
     } else {
       list.replaceChildren(...items.map(card));
     }
+    // Put focus back only if that question is still open; an answered one is gone.
+    const again = focusKey && [...list.querySelectorAll('input.other')].find((el) => el.dataset.key === focusKey);
+    if (again) { again.focus(); try { again.setSelectionRange(caret[0], caret[1]); } catch {} }
   }
 
   const footer = document.getElementById('hubs');
