@@ -289,6 +289,46 @@ ipcMain.handle('add-hub', (_e, { name, address, token } = {}) => {
 ipcMain.on('remove-hub', (_e, name) => { config.removeHub(String(name || '')); configChanged(); });
 ipcMain.on('copy-share-line', () => { const line = shareLine(config.loadConfig()); if (line) clipboard.writeText(line); });
 
+// ---------- pairing with your other machines over Tailscale (no tokens to copy) ----------
+let tsModule = null;
+const tailscale = async () => (tsModule ||= await import(pathToFileURL(path.join(__dirname, '..', 'src', 'tailscale.mjs')).href));
+const v4Of = (p) => p.ips.find((a) => a.includes('.')) || null;
+// Your own devices (same Tailscale user, not tagged servers), and whether Agent Deck answers there.
+// Agent Deck only answers on a machine that has "Share this machine" on.
+ipcMain.handle('tailscale-devices', async () => {
+  const st = await (await tailscale()).tsStatus();
+  if (!st) return { ok: false, error: 'Tailscale isn\'t running on this machine.' };
+  const cfg = config.loadConfig();
+  const added = new Set((cfg.hubs || []).map((h) => config.hubUrl(h.url)));
+  const mine = st.peers.filter((p) => p.userId === st.self.userId && !p.tagged && v4Of(p));
+  const list = await Promise.all(mine.map(async (p) => {
+    const ip = v4Of(p);
+    // 404 = an Agent Deck from before pairing existed (shared, but needs a git pull there).
+    const probe = p.online ? await fetch(`http://${ip}:${cfg.port}/pair`, { signal: AbortSignal.timeout(2500) })
+      .then((r) => (r.ok ? r.json() : { outdated: r.status === 404 })).catch(() => null) : null;
+    return { dns: p.dns, name: p.name, os: p.os, online: p.online, ip, agentDeck: Boolean(probe?.agentDeck), outdated: Boolean(probe?.outdated), added: added.has(config.hubUrl(`${ip}:${cfg.port}`)) };
+  }));
+  return { ok: true, devices: list.sort((a, b) => Number(b.agentDeck) - Number(a.agentDeck) || Number(b.online) - Number(a.online)) };
+});
+// Ask that machine to let this panel in; its panel shows Allow / Deny. Resolves when answered.
+ipcMain.handle('pair', async (_e, ip, letBack) => {
+  const st = await (await tailscale()).tsStatus();
+  const peer = st?.peers.find((p) => v4Of(p) === ip && p.userId === st.self.userId && !p.tagged);
+  if (!peer) return { ok: false, error: 'Not one of your Tailscale devices.' };
+  const cfg = config.loadConfig();
+  const r = await fetch(`http://${ip}:${cfg.port}/pair`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    // "shared" offers the other way round; only when you ticked it here and this machine is shared.
+    body: JSON.stringify({ shared: letBack === true && !config.isLoopback(cfg.bind), port: cfg.port }), signal: AbortSignal.timeout(150000),
+  }).then((x) => (x.ok ? x.json() : { approved: false, reason: `refused (${x.status})` }), () => null);
+  if (!r) return { ok: false, error: `Couldn't reach Agent Deck on ${peer.dns}. Is "Share this machine" on there?` };
+  if (!r.approved) return { ok: false, error: `${peer.dns}: ${r.reason || 'not allowed'}` };
+  const url = config.hubUrl(`${ip}:${cfg.port}`);
+  if (!(config.loadConfig().hubs || []).some((h) => config.hubUrl(h.url) === url)) config.addHub(peer.dns, url, null);
+  configChanged();
+  return { ok: true, back: Boolean(r.back), name: peer.dns };
+});
+
 // "Share this machine": runs "agent-deck share <Tailscale IP>" / "agent-deck unshare", which restart
 // the daemon. The panel has no node of its own, so Electron runs the CLI as plain Node; the daemon it
 // starts runs that way too, until the next "agent-deck restart" from a terminal.

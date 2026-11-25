@@ -10,8 +10,9 @@ import crypto from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import {
-  loadConfig, ensureHome, machineName, isLoopback, tokensMatch, STATE_PATH, LOG_PATH, PID_PATH, CONFIG_PATH,
+  loadConfig, ensureHome, machineName, isLoopback, tokensMatch, STATE_PATH, LOG_PATH, PID_PATH, CONFIG_PATH, HOME,
 } from './config.mjs';
+import { ownDevice, plainIp } from './tailscale.mjs';
 import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
@@ -104,21 +105,56 @@ function checkWake(now = Date.now()) {
   if (gap) log(`woke after ${Math.round(gap / 1000)} s: agent heartbeat clocks moved on`);
 }
 
+// ---------- paired devices (Tailscale) ----------
+// Your own devices (same Tailscale user, not tagged servers) that you allowed to see this machine.
+// They connect without a token: Tailscale vouches for who they are (tailscale.mjs). This daemon
+// owns devices.json; panels change it only through messages from this machine.
+const DEVICES_PATH = path.join(HOME, 'devices.json');
+const devices = new Map(); // Tailscale StableID -> { id, dns, name, login, addedAt }
+try { for (const d of JSON.parse(fs.readFileSync(DEVICES_PATH, 'utf8'))) if (d && typeof d.id === 'string') devices.set(d.id, d); } catch {}
+const saveDevices = () => { ensureHome(); fs.writeFileSync(DEVICES_PATH, JSON.stringify([...devices.values()], null, 2) + '\n', { mode: 0o600 }); };
+const allowDevice = (dev) => {
+  devices.set(dev.id, { id: dev.id, dns: dev.dns, name: dev.name, login: dev.login, addedAt: Date.now() });
+  saveDevices();
+  log(`device allowed: ${dev.name} (${dev.login})`);
+};
+/** pairing request id -> { id, device, ip, port, shared, back, at, res, timer } */
+const pairRequests = new Map();
+const deniedUntil = new Map(); // device id -> no new request from it until then
+const PAIR_HOLD_MS = Number(process.env.AGENT_DECK_PAIR_HOLD_MS) || 120000;
+const localPanels = () => [...widgets].filter((w) => w.local && w.readyState === 1);
+function finishPair(r, approved, reason = '') {
+  if (!pairRequests.delete(r.id)) return;
+  clearTimeout(r.timer);
+  if (!r.res.writableEnded && !r.res.destroyed) {
+    r.res.writeHead(200, { 'content-type': 'application/json' });
+    r.res.end(JSON.stringify({ name: NAME, approved, reason, back: Boolean(r.back) }));
+  }
+  broadcast();
+}
+
 // ---------- broadcasting ----------
 let broadcastTimer = null;
-function snapshot() {
+// Pairing requests and the device list go only to panels on this machine (local), never to
+// another machine's panel.
+function snapshot(local = false) {
   checkWake();
-  return {
+  const s = {
     type: 'snapshot', host: NAME, version: VERSION, holdSeconds: HOLD_MS / 1000,
-    sessions: [...sessions.values()].filter((s) => !s.dismissed).map((s) => publicView(s, { warnPercent: Number(cfg.contextWarnPercent) || 80 })),
+    sessions: [...sessions.values()].filter((x) => !x.dismissed).map((x) => publicView(x, { warnPercent: Number(cfg.contextWarnPercent) || 80 })),
     agents: [...agents.values()].map((a) => agentView(a)),
   };
+  if (local) {
+    s.pairRequests = [...pairRequests.values()].map((r) => ({ id: r.id, name: r.device.name, dns: r.device.dns, login: r.device.login, ip: r.ip, port: r.port, shared: r.shared, at: r.at }));
+    s.devices = [...devices.values()].map((d) => ({ ...d, connected: [...widgets].some((w) => w.deviceId === d.id) }));
+  }
+  return s;
 }
 function broadcast() {
   clearTimeout(broadcastTimer);
   broadcastTimer = setTimeout(() => {
-    const msg = JSON.stringify(snapshot());
-    for (const ws of widgets) if (ws.readyState === 1) ws.send(msg);
+    const remote = JSON.stringify(snapshot(false)), local = JSON.stringify(snapshot(true));
+    for (const ws of widgets) if (ws.readyState === 1) ws.send(ws.local ? local : remote);
   }, 60);
   scheduleSave();
 }
@@ -540,7 +576,26 @@ function handleWidgetMessage(ws, msg) {
   switch (msg.type) {
     case 'hello':
       ws.approvals = Boolean(msg.approvals);
-      ws.send(JSON.stringify(snapshot()));
+      ws.send(JSON.stringify(snapshot(ws.local)));
+      break;
+    // Pairing: only a panel on this machine may answer a request or change the device list.
+    case 'pair-decide': {
+      const r = ws.local && pairRequests.get(msg.id);
+      if (!r) break;
+      if (msg.allow) { allowDevice(r.device); r.back = Boolean(msg.back) && r.shared; finishPair(r, true); }
+      else { deniedUntil.set(r.device.id, Date.now() + 10 * 60000); log(`pairing denied: ${r.device.name}`); finishPair(r, false, 'denied'); }
+      break;
+    }
+    case 'allow-device': // this panel paired with that machine, which asked to see this one too
+      if (!ws.local) break;
+      ownDevice(String(msg.ip || '')).then((dev) => { if (dev) { allowDevice(dev); broadcast(); } });
+      break;
+    case 'remove-device':
+      if (!ws.local || !devices.delete(msg.id)) break;
+      saveDevices();
+      log(`device removed: ${msg.id}`);
+      for (const w of widgets) if (w.deviceId === msg.id) w.close(4001, 'removed');
+      broadcast();
       break;
     case 'approvals':
       ws.approvals = Boolean(msg.enabled);
@@ -650,6 +705,10 @@ function handleRequest(req, res) {
     res.end(JSON.stringify({ ok: true, name: NAME, version: VERSION, sessions: sessions.size }));
     return;
   }
+  if (req.url === '/pair' && (req.method === 'GET' || req.method === 'POST')) {
+    handlePair(req, res).catch((e) => { log('pair error: ' + e.message); if (!res.headersSent) res.writeHead(500).end(); });
+    return;
+  }
   if (req.method === 'POST' && req.url === '/agent') {
     // Service agents report from this machine only, like hooks.
     if (!isLoopback(remote)) { res.writeHead(403).end(); return; }
@@ -684,6 +743,36 @@ function handleRequest(req, res) {
   res.writeHead(404).end();
 }
 
+// Pairing between your own machines over Tailscale (reachable only while this one is shared).
+// GET: "is Agent Deck here, and am I paired?". POST: ask to be allowed; held until a panel on
+// this machine answers (or PAIR_HOLD_MS). Only your own devices get any answer but 403.
+async function handlePair(req, res) {
+  const remote = req.socket.remoteAddress;
+  if (isLoopback(remote)) { res.writeHead(400).end(); return; } // pairing is between machines
+  if (req.method === 'POST' && refusedPost(req, res)) return;
+  const dev = await ownDevice(remote);
+  if (!dev) { log(`pairing refused from ${plainIp(remote)}: not one of your Tailscale devices`); res.writeHead(403).end(); return; }
+  const reply = (o) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ name: NAME, ...o })); };
+  if (req.method === 'GET') { reply({ agentDeck: true, version: VERSION, paired: devices.has(dev.id) }); return; }
+  let raw = '';
+  req.setEncoding('utf8');
+  req.on('data', (c) => { raw += c; if (raw.length > 2048) req.destroy(); });
+  await new Promise((resolve) => req.on('end', resolve));
+  let body;
+  try { body = JSON.parse(raw || '{}'); } catch { res.writeHead(400).end(); return; }
+  if (devices.has(dev.id)) { reply({ approved: true }); return; }
+  if ((deniedUntil.get(dev.id) || 0) > Date.now()) { reply({ approved: false, reason: 'denied a moment ago; try again in a few minutes' }); return; }
+  if (!localPanels().length) { reply({ approved: false, reason: `no Agent Deck panel is open on ${NAME} to approve it` }); return; }
+  if (pairRequests.size >= 3 || [...pairRequests.values()].some((x) => x.device.id === dev.id)) { reply({ approved: false, reason: 'a request is already waiting there' }); return; }
+  const port = Number.isInteger(body.port) && body.port > 0 && body.port < 65536 ? body.port : PORT;
+  const r = { id: crypto.randomUUID(), device: dev, ip: plainIp(remote), port, shared: body.shared === true, at: Date.now(), res };
+  r.timer = setTimeout(() => finishPair(r, false, 'no answer in time'), PAIR_HOLD_MS);
+  res.on('close', () => { if (pairRequests.delete(r.id)) { clearTimeout(r.timer); broadcast(); } }); // the asker gave up
+  pairRequests.set(r.id, r);
+  log(`pairing request from ${dev.name} (${dev.login})`);
+  broadcast();
+}
+
 // Hooks always arrive on loopback. If sharing on a specific address, listen there too.
 const ANY = ['0.0.0.0', '::'];
 const binds = isLoopback(BIND) || ANY.includes(BIND) ? [BIND] : ['127.0.0.1', BIND];
@@ -695,7 +784,7 @@ const servers = binds.map(() => {
 });
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1e6 });
-function handleUpgrade(req, socket, head) {
+async function handleUpgrade(req, socket, head) {
   const url = new URL(req.url, 'http://x');
   if (url.pathname !== '/ws') { socket.destroy(); return; }
   const remote = req.socket.remoteAddress;
@@ -706,16 +795,25 @@ function handleUpgrade(req, socket, head) {
     socket.destroy();
     return;
   }
+  let deviceId = null;
   if (!isLoopback(remote) && !tokensMatch(url.searchParams.get('token') || '', cfg.token || '')) {
-    log(`rejected widget from ${remote}: bad token`);
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-    socket.destroy();
-    return;
+    // No (right) token: a paired Tailscale device gets in on its identity. Anything else is refused.
+    socket.on('error', () => {}); // a reset while Tailscale answers mustn't crash the daemon
+    const dev = devices.size ? await ownDevice(remote).catch(() => null) : null;
+    if (!dev || !devices.has(dev.id)) {
+      log(`rejected widget from ${plainIp(remote)}: no token and not a paired device`);
+      if (!socket.destroyed) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); }
+      return;
+    }
+    if (socket.destroyed) return;
+    deviceId = dev.id;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     ws.approvals = false;
+    ws.local = isLoopback(remote);
+    ws.deviceId = deviceId;
     widgets.add(ws);
-    log(`widget connected from ${remote} (${widgets.size} total)`);
+    log(`widget connected from ${remote}${deviceId ? ` (paired device ${devices.get(deviceId)?.name})` : ''} (${widgets.size} total)`);
     ws.on('message', (data) => {
       try { handleWidgetMessage(ws, JSON.parse(String(data))); } catch (e) { log('widget msg error: ' + (e instanceof SyntaxError ? 'SyntaxError' : e.message)); } // a parse error quotes the message
     });
@@ -724,8 +822,10 @@ function handleUpgrade(req, socket, head) {
       log(`widget disconnected (${widgets.size} left)`);
       // Nobody left to answer: hand pending prompts back to the terminal right away.
       if (!approversConnected()) for (const p of [...pendings.values()]) p.finish(null, 'no widgets');
+      if (ws.deviceId) broadcast(); // "connected" in the local panel's device list
     });
-    ws.send(JSON.stringify(snapshot()));
+    ws.send(JSON.stringify(snapshot(ws.local)));
+    if (deviceId) broadcast();
   });
 }
 
@@ -747,7 +847,7 @@ loadState();
 startOtlp();
 let listening = 0;
 servers.forEach((srv, i) => {
-  srv.on('upgrade', handleUpgrade);
+  srv.on('upgrade', (req, socket, head) => handleUpgrade(req, socket, head).catch((e) => { log('upgrade error: ' + e.message); socket.destroy(); }));
   srv.on('error', (e) => {
     if (e.code === 'EADDRINUSE') { log(`port ${PORT} busy on ${binds[i]}, another daemon is running`); process.exit(0); }
     log('server error: ' + e.message);
