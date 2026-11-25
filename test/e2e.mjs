@@ -354,7 +354,15 @@ async function main() {
   // 9k3. The activity window: a session's subagents, from <session>/subagents/ next to its transcript.
   const ACT = path.join(HOME, 'act'), ACT_T = path.join(ACT, 'sess-act.jsonl'), SUB = path.join(ACT, 'sess-act', 'subagents');
   fs.mkdirSync(SUB, { recursive: true });
-  fs.writeFileSync(ACT_T, '');
+  // Its own transcript: two tasks (one done, one in progress) and a plan approved through ExitPlanMode.
+  const mainLine = (o) => JSON.stringify({ isSidechain: false, timestamp: new Date(Date.now() - 60000).toISOString(), ...o }) + '\n';
+  const call = (id, name, input) => mainLine({ type: 'assistant', message: { id: 'msg-' + id, model: 'claude-opus-5-5', content: [{ type: 'tool_use', id, name, input }], usage: { input_tokens: 10, output_tokens: 1 } } });
+  const result = (id, text, toolUseResult) => mainLine({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: text }] }, toolUseResult });
+  fs.writeFileSync(ACT_T,
+    call('tc1', 'TaskCreate', { subject: 'Read the code' }) + result('tc1', 'Task #1 created successfully: Read the code', { task: { id: '1', subject: 'Read the code' } })
+    + call('tc2', 'TaskCreate', { subject: 'Write the tests' }) + result('tc2', 'Task #2 created successfully: Write the tests', { task: { id: '2', subject: 'Write the tests' } })
+    + call('tu1', 'TaskUpdate', { taskId: '1', status: 'completed' }) + call('tu2', 'TaskUpdate', { taskId: '2', status: 'in_progress' })
+    + call('ep1', 'ExitPlanMode', {}) + result('ep1', 'User has approved your plan.', { plan: '# The plan\n- one\n- two' }));
   const ago = (msAgo) => new Date(Date.now() - msAgo).toISOString();
   const jl = (o) => JSON.stringify(o) + '\n';
   const toolLine = (id, name, input, msAgo) => jl({ type: 'assistant', isSidechain: true, timestamp: ago(msAgo),
@@ -384,6 +392,9 @@ async function main() {
   const waitFor = async (pred, label) => { for (let i = 0; i < 80; i++) { if (pred()) return; await sleep(100); } throw new Error('timed out: ' + label); };
   const sub = (id) => acts.at(-1)?.agents.find((x) => x.id === id);
   await waitFor(() => acts.at(-1)?.agents.length === 3, 'three subagents');
+  await waitFor(() => acts.at(-1)?.main.plan?.doc, 'the plan from the session transcript');
+  assert.deepEqual(acts.at(-1).main.plan.tasks, [{ text: 'Read the code', status: 'completed' }, { text: 'Write the tests', status: 'in_progress' }]);
+  assert.deepEqual([acts.at(-1).main.plan.doc.state, acts.at(-1).main.plan.doc.text], ['approved', '# The plan\n- one\n- two']);
   assert.equal(acts.at(-1).main.project, 'act');
   assert.deepEqual(['a1', 'a2', 'f1'].map((id) => sub(id).parent), ['main', 'main', 'a2'], 'the fork hangs off the agent that started it');
   assert.deepEqual(['a1', 'a2', 'f1'].map((id) => sub(id).status), ['done', 'running', 'stopped'], 'unfinished and quiet for 10 minutes = stopped');
@@ -397,7 +408,7 @@ async function main() {
   await waitFor(() => sub('a2')?.status === 'done', 'finished');
   assert.equal(snapshotsAfterWatch, 0, 'an activity window gets no session snapshots');
   aw.close();
-  ok('activity window: subagents from the session folder, linked parent to child, running/done/stopped, live updates');
+  ok('activity window: the plan (tasks with status, the approved plan document) and subagents linked parent to child, running/done/stopped, live updates');
 
   // 9l. The panel's settings change holdSeconds in config.json; the daemon picks it up live.
   const cfgFile = path.join(HOME, 'config.json');

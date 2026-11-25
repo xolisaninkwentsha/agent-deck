@@ -249,6 +249,7 @@ The **tree button** on a card, or **Open the activity window** in its expanded v
   - stopped: it never recorded an end and has been quiet for 3 minutes.
 - **Under each row:** its current step, tool count and tokens.
 - **Click a row** for its steps, newest first, and its latest message or last reply. **Running only** hides finished work.
+- **Plan**, at the top: the session's task list ticked off as it goes (TaskCreate/TaskUpdate, or TodoWrite), with "x of y done". Below it is the latest plan document (from plan mode), marked approved, rejected or proposed and folded until you open it. Both are read from the session's transcript.
 - **Where the data comes from:** Claude Code keeps each subagent's transcript and a small description file next to the session's transcript (`<session>/subagents/`). The window is built from those, so it works for watch-only sessions, and from another machine's panel through its share.
 - **Cost:** only sessions with a window open are read, at most the 60 most recently active subagents, a little at a time.
 - **Privacy:** it shows the same kind of text as the cards: descriptions, step summaries and a short last message, never full prompts or tool output.
