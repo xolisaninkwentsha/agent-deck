@@ -69,6 +69,12 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .bar { flex: 1; height: 3px; border-radius: 2px; background: #2c3138; overflow: hidden; }
 .bar .fill { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width .4s; }
 .bg-count { color: var(--background); }
+/* context-window meter */
+.ctx { display: flex; align-items: center; gap: 4px; margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ctx-bar { width: 34px; height: 3px; border-radius: 2px; background: #2c3138; overflow: hidden; }
+.ctx-fill { display: block; height: 100%; background: var(--muted); border-radius: 2px; }
+.ctx.warn { color: var(--approval); } .ctx.warn .ctx-fill { background: var(--approval); }
+.ctx.full { color: var(--error); } .ctx.full .ctx-fill { background: var(--error); }
 
 .status.st-working { color: var(--accent); }
 .status.st-approval { color: var(--approval); }

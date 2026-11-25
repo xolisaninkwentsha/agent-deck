@@ -131,14 +131,28 @@ function avatar(s) {
     h('span', { class: 'eye l' }), h('span', { class: 'eye r' }), h('span', { class: 'mouth' }));
 }
 
+const tokens = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : `${Math.round(n / 1000)}k`);
+
+// How full the session's context window is (amber from the warning threshold, red near full).
+function contextMeter(c) {
+  if (!c) return null;
+  return h('span', {
+    class: 'ctx' + (c.percent >= 95 ? ' full' : c.warn ? ' warn' : ''),
+    title: `${tokens(c.used)} of ${tokens(c.window)} tokens in context${c.model ? ` (${c.model})` : ''}`,
+  },
+    h('span', { class: 'ctx-bar' }, h('span', { class: 'ctx-fill', style: { width: c.percent + '%' } })),
+    h('span', { text: `ctx ${c.percent}%` }));
+}
+
 function progressRow(s) {
   const p = s.progress;
   const label = h('span', { class: `status st-${s.status}`, text: STATUS_LABEL[s.status] || s.status });
-  if (!p || !p.total) return h('div', { class: 'meta' }, label, s.background.length ? h('span', { class: 'bg-count', text: `${s.background.length} in background` }) : null);
+  const ctx = s.status === 'ended' ? null : contextMeter(s.context);
+  if (!p || !p.total) return h('div', { class: 'meta' }, label, s.background.length ? h('span', { class: 'bg-count', text: `${s.background.length} in background` }) : null, ctx);
   const pct = Math.round((p.done / p.total) * 100);
   return h('div', { class: 'meta' },
     h('span', { class: 'frac', text: `${p.done}/${p.total}` }), label,
-    h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })));
+    h('span', { class: 'bar' }, h('span', { class: 'fill', style: { width: pct + '%' } })), ctx);
 }
 
 function approvalBox(hub, s, p) {

@@ -24,6 +24,10 @@ export const DEFAULTS = {
   holdSeconds: 300,
   // Name shown on this machine's cards. Defaults to the hostname.
   name: null,
+  // Context meter on each card: warn (amber) from this percentage of the window.
+  contextWarnPercent: 80,
+  // Context window per model-id prefix, if the built-in guess is wrong, e.g. {"claude-opus-5-5": 1000000}.
+  contextWindows: {},
   // Widget only: daemons to connect to. The local one is always included.
   hubs: [],
   // Widget only: let the panel answer approvals and questions.

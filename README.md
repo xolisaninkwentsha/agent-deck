@@ -85,6 +85,14 @@ Claude Code keeps a small file per running session in `~/.claude/sessions/`, wit
 
 The file isn't a documented Claude Code format (checked with 2.1.332). If it changes, those extras stop and the rest of Agent Deck works as before.
 
+## Context meter
+
+Each card shows how full the session's context window is (`ctx 59%`; hover for the token count and model). It turns amber from `contextWarnPercent` (80% by default) and red from 95%.
+
+- The number is the input, cache-write and cache-read tokens of the session's latest message, which is what its next request sends. Subagents don't count.
+- Transcripts don't say which window a session has, so it's worked out from the model: 1M for current models (Opus 5.x and 4.6–4.8, Sonnet 5.x and 4.6, Haiku 5.x, Fable, Mythos), 200K otherwise. Anything using more than 200K is counted against 1M. If a guess is wrong, set `contextWindows` in the config, e.g. `{"claude-opus-5-5": 1000000}`.
+- After `/compact` the meter shows what the next message really sends. On a short conversation that can be *more* than before, because the summary and re-attached context are added.
+
 ## Ubuntu notes
 
 - On Ubuntu 23.10+ run this once after `npm install` (Ubuntu blocks Electron's usual sandbox; `agent-deck widget` reminds you if needed):
@@ -117,6 +125,8 @@ agent-deck start | stop | restart        # the daemon
 | `name` | hostname | machine label on cards |
 | `hubs` | `[]` | other machines this panel shows (managed by `add-hub`) |
 | `approvalsInWidget` | true | the shield button |
+| `contextWarnPercent` | 80 | context meter turns amber from here |
+| `contextWindows` | `{}` | context window per model-id prefix, if the built-in guess is wrong |
 
 ## Try it without real agents
 

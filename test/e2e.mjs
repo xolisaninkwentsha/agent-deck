@@ -287,6 +287,33 @@ async function main() {
   ok('a card waiting in the terminal clears when Claude Code says the session is idle');
   rec.kill();
 
+  // 9k. Context-window meter from the transcript's token usage.
+  const CTX = path.join(HOME, 'ctx.jsonl');
+  const usageLine = (model, used, extra = {}) => JSON.stringify({
+    type: 'assistant', ...extra,
+    message: { role: 'assistant', model, content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 10, cache_creation_input_tokens: 990, cache_read_input_tokens: used - 1000, output_tokens: 50 } },
+  }) + '\n';
+  fs.writeFileSync(CTX, usageLine('claude-opus-5-5', 100000) + usageLine('claude-opus-5-5', 401000) + usageLine('claude-opus-5-5', 900000, { isSidechain: true }));
+  await hook('observe', { session_id: 'sess-ctx', cwd: '/work/ctx', transcript_path: CTX, hook_event_name: 'SessionStart', source: 'startup' });
+  const cs = () => snap.sessions.find((x) => x.id === 'sess-ctx');
+  await until(() => cs()?.context?.used === 401000, 'context from the newest main-thread message', 60);
+  assert.equal(cs().context.window, 1000000);
+  assert.equal(cs().context.percent, 40);
+  assert.equal(cs().context.warn, false);
+  ok('context meter: newest main-thread usage (subagents ignored), Opus 5.5 = 1M window');
+
+  fs.appendFileSync(CTX, usageLine('claude-haiku-4-5', 170000));
+  await until(() => cs()?.context?.used === 170000, 'context grows with the transcript', 60);
+  assert.equal(cs().context.window, 200000);
+  assert.equal(cs().context.percent, 85);
+  assert.equal(cs().context.warn, true);
+  ok('context meter: Haiku 4.5 = 200K window, warns from 80%');
+
+  fs.appendFileSync(CTX, usageLine('claude-unknown-model', 210000));
+  await until(() => cs()?.context?.used === 210000, 'unknown model', 60);
+  assert.equal(cs().context.window, 1000000);
+  ok('context meter: more than 200K in use means the window is bigger (1M)');
+
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));
   await hook('observe', base('SubagentStart', { agent_id: 'ag1', agent_type: 'Explore' }));

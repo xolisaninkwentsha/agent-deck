@@ -250,9 +250,16 @@ export function progressOf(s) {
   return null;
 }
 
+function contextView(c, warnPercent) {
+  if (!c || !c.used || !c.window) return null;
+  const percent = Math.min(100, Math.round((c.used / c.window) * 100));
+  return { used: c.used, window: c.window, model: c.model || '', percent, warn: percent >= warnPercent };
+}
+
 // What the widget receives (no internal timestamps it doesn't need).
-export function publicView(s) {
+export function publicView(s, { warnPercent = 80 } = {}) {
   return {
+    context: contextView(s.context, warnPercent),
     // Claude Code's own session name reads better than the first prompt (which can be a paste).
     key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.name || s.title,
     watchOnly: s.source === 'discovered',

@@ -70,6 +70,35 @@ export function readTail(file, bytes = 65536) {
   } catch { return null; }
 }
 
+// How full the context window is: input + cache writes + cache reads of the latest main-thread
+// (not subagent) assistant message is what the next request will send. Null if not in the tail.
+export function contextUsage(tail) {
+  if (!tail) return null;
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"usage"') || !lines[i].includes('"assistant"')) continue;
+    let e;
+    try { e = JSON.parse(lines[i]); } catch { continue; }
+    const u = e.type === 'assistant' && !e.isSidechain ? e.message?.usage : null;
+    if (!u) continue;
+    const used = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+    if (used > 0) return { model: String(e.message.model || ''), used };
+  }
+  return null;
+}
+
+// Context window by model. Transcripts don't say which window a session has, so infer it.
+// 1M models per the Claude API model table (Nov 2026): Fable, Mythos, Opus 5.x / 4.6-4.8,
+// Sonnet 5.x / 4.6, Haiku 5.x. Everything else (e.g. Haiku 4.5) defaults to 200K.
+const ONE_MILLION = /^claude-(fable|mythos|opus-5|opus-4-[678]|sonnet-5|sonnet-4-6|haiku-5)/;
+export function contextWindow(model = '', used = 0, overrides = {}) {
+  const key = Object.keys(overrides || {}).filter((k) => model.startsWith(k)).sort((a, b) => b.length - a.length)[0];
+  let window = key ? Number(overrides[key]) || 200000
+    : /\[1m\]/i.test(model) || ONE_MILLION.test(model) ? 1000000 : 200000;
+  if (used > window) window = Math.max(1000000, used); // can't hold more than its window: it's bigger
+  return window;
+}
+
 // What the session did last, from the end of its transcript.
 export function lastActivity(tail) {
   const res = { tool: null, text: '', todos: null };

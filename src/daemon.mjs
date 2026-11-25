@@ -15,7 +15,7 @@ import {
 import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
-import { runningSessions, transcriptFor, readTail, lastActivity } from './claude-sessions.mjs';
+import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
 
 const VERSION = '0.1.0';
 const cfg = loadConfig();
@@ -89,7 +89,7 @@ let broadcastTimer = null;
 function snapshot() {
   return {
     type: 'snapshot', host: NAME, version: VERSION, holdSeconds: HOLD_MS / 1000,
-    sessions: [...sessions.values()].filter((s) => !s.dismissed).map(publicView),
+    sessions: [...sessions.values()].filter((s) => !s.dismissed).map((s) => publicView(s, { warnPercent: Number(cfg.contextWarnPercent) || 80 })),
   };
 }
 function broadcast() {
@@ -254,15 +254,26 @@ const WATCH_STEP = {
   [STATUS.IDLE]: 'Your turn', [STATUS.BACKGROUND]: 'Background work running',
 };
 
+// Read the end of a session's transcript if it grew since last time, and update the context
+// meter from it. Returns the tail text (for the caller to use too), or null if nothing changed.
+function refreshTranscript(s, now) {
+  const file = s.transcript || (s.source === 'discovered' ? (s.transcript = transcriptFor(s.id, s.cwd)) : null);
+  if (!file) return null;
+  let size;
+  try { size = fs.statSync(file).size; } catch { return null; }
+  if (size === s.transcriptSize) return null;
+  s.transcriptSize = size;
+  const tail = readTail(file, 262144); // large: api-request-blob entries can push usage out of a small tail
+  const u = contextUsage(tail);
+  if (u) s.context = { used: u.used, model: u.model, window: contextWindow(u.model, u.used, cfg.contextWindows), at: now };
+  return tail || null;
+}
+
 // A session with no hooks: everything comes from its session file and transcript.
-function syncDiscovered(s, r, now) {
+function syncDiscovered(s, r, now, tail) {
   let changed = false;
-  const file = s.transcript || (s.transcript = transcriptFor(s.id, s.cwd));
-  let size = -1;
-  try { size = fs.statSync(file).size; } catch {}
-  if (file && size !== s.transcriptSize) {
-    s.transcriptSize = size;
-    const act = lastActivity(readTail(file));
+  if (tail) {
+    const act = lastActivity(tail);
     if (act.tool) { s.toolStep = describeTool(act.tool.name, act.tool.input); setStep(s, s.toolStep, now, act.tool.name); }
     if (act.text) s.lastMessage = String(act.text).replace(/\s+/g, ' ').trim().slice(0, 160);
     if (act.todos) s.todos = todosSummary(act.todos);
@@ -297,7 +308,7 @@ function reconcile(s, r, now) {
   return changed;
 }
 
-function syncFromClaude(now) {
+function syncFromClaude(now, tails) {
   let changed = false;
   const seen = new Set();
   for (const r of runningSessions()) {
@@ -314,7 +325,9 @@ function syncFromClaude(now) {
     if (!s.pid) s.pid = r.pid;
     if (r.name && s.name !== r.name) { s.name = r.name; changed = true; }
     if (s.ended) continue;
-    changed = (s.source === 'discovered' ? syncDiscovered(s, r, now) : reconcile(s, r, now)) || changed;
+    // A session found this tick hasn't had its transcript read yet; others were read already.
+    const tail = tails.has(key) ? tails.get(key) : refreshTranscript(s, now);
+    changed = (s.source === 'discovered' ? syncDiscovered(s, r, now, tail) : reconcile(s, r, now)) || changed;
   }
   // Claude Code removes the file when the session exits.
   for (const s of sessions.values()) {
@@ -442,7 +455,15 @@ function jumpTo(s) {
 setInterval(() => {
   const now = Date.now();
   let changed = false;
-  try { changed = syncFromClaude(now); } catch (e) { log('reading ~/.claude/sessions failed: ' + e.message); }
+  const tails = new Map();
+  for (const s of sessions.values()) {
+    if (s.ended) continue;
+    const before = s.context?.used;
+    const tail = refreshTranscript(s, now);
+    if (tail !== null) tails.set(s.key, tail);
+    if (s.context?.used !== before) changed = true;
+  }
+  try { changed = syncFromClaude(now, tails) || changed; } catch (e) { log('reading ~/.claude/sessions failed: ' + e.message); }
   for (const s of sessions.values()) {
     if (!s.ended && !pidAlive(s.pid)) {
       s.ended = true; s.status = STATUS.ENDED; s.step = 'Session ended'; s.statusTs = now; changed = true;
