@@ -236,6 +236,7 @@ function card({ hub, s }) {
         progressRow(s)),
       h('div', { class: 'side' },
         multi ? h('span', { class: 'host', text: hub.name }) : null,
+        s.watchOnly ? h('span', { class: 'watch', text: 'watch only', title: 'Started before Agent Deck\'s hooks were installed. Restart the session to answer from here.' }) : null,
         h('div', { class: 'side-btns' },
           hub.local && s.canJump ? h('button', { class: 'icon small', title: 'Jump to this session', html: ICONS.jump, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'jump', key: s.key }); } }) : null,
           h('button', { class: 'icon small', title: 'Hide this card', html: ICONS.close, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'dismiss', key: s.key }); } })))),
@@ -274,7 +275,7 @@ function render() {
       const anyConnected = state.hubs.some((x) => x.connected);
       list.replaceChildren(h('div', { class: 'empty' },
         anyConnected ? 'No Claude Code sessions yet.' : 'Connecting to the Agent Deck daemon…',
-        h('div', { class: 'hint', text: anyConnected ? 'Start one with "claude". Sessions that were already open appear once you restart them.' : 'Run "agent-deck start" if this doesn\'t clear.' })));
+        h('div', { class: 'hint', text: anyConnected ? 'Start one with "claude"; running sessions show up within a few seconds.' : 'Run "agent-deck start" if this doesn\'t clear.' })));
     } else {
       list.replaceChildren(...items.map(card));
     }

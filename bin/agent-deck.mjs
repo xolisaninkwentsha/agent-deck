@@ -97,7 +97,7 @@ const commands = {
     const ok = await ensureDaemon();
     console.log(ok ? `Daemon running on 127.0.0.1:${cfg.port}` : `Couldn't start the daemon; see ${LOG_PATH}`);
     console.log('\nNext:');
-    console.log('  1. Restart any Claude Code sessions that were already open (hooks load when a session starts).');
+    console.log('  1. Sessions that were already open show as "watch only"; restart them to answer prompts from the panel.');
     console.log('  2. Open the panel:  agent-deck widget');
     console.log('  3. Want this machine visible from another computer?  agent-deck share');
   },

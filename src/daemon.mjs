@@ -13,8 +13,9 @@ import {
   loadConfig, ensureHome, machineName, isLoopback, tokensMatch, STATE_PATH, LOG_PATH, PID_PATH,
 } from './config.mjs';
 import {
-  newSession, applyEvent, publicView, describeApproval, STATUS,
+  newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
+import { runningSessions, transcriptFor, readTail, lastActivity } from './claude-sessions.mjs';
 
 const VERSION = '0.1.0';
 const cfg = loadConfig();
@@ -193,7 +194,7 @@ function hold(s, res, { kind, hookEvent, toolName, toolInput, suggestions, agent
       resolve(output);
     };
     const timer = setTimeout(() => finish(null, 'timeout'), holdMs);
-    pendings.set(id, { key: s.key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind, agentId: agentId || null });
+    pendings.set(id, { key: s.key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind, agentId: agentId || null, createdAt: now });
     // If Claude Code gives up on the hook (or the session dies), drop the pending card.
     res.on('close', () => { if (pendings.has(id)) finish(null, 'hook closed'); });
     log(`holding ${kind} ${id} for ${s.key} (${toolName})`);
@@ -232,19 +233,96 @@ function interruptedInTranscript(s) {
   try { st = fs.statSync(file); } catch { return false; }
   if (st.mtimeMs < s.statusTs || st.size === s.transcriptSeen) return false;
   s.transcriptSeen = st.size;
-  const len = Math.min(st.size, 65536);
-  const buf = Buffer.alloc(len);
-  try {
-    const fd = fs.openSync(file, 'r');
-    try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
-  } catch { return false; }
-  for (const line of buf.toString('utf8').split('\n').reverse()) {
+  const tail = readTail(file);
+  if (!tail) return false;
+  for (const line of tail.split('\n').reverse()) {
     if (!line.includes('[Request interrupted by user')) continue;
     let e;
     try { e = JSON.parse(line); } catch { continue; }
     if (e.type === 'user' && Date.parse(e.timestamp) >= s.statusTs - 1000) return true;
   }
   return false;
+}
+
+// ---------- what Claude Code itself says (~/.claude/sessions, see claude-sessions.mjs) ----------
+const FILE_STATUS = { busy: STATUS.WORKING, idle: STATUS.IDLE, shell: STATUS.BACKGROUND };
+const fileStatus = (r) => (r.status === 'waiting'
+  ? (r.waitingFor === 'input needed' ? STATUS.QUESTION : STATUS.APPROVAL)
+  : FILE_STATUS[r.status] || null);
+const WATCH_STEP = {
+  [STATUS.APPROVAL]: 'Needs approval in the terminal', [STATUS.QUESTION]: 'Question waiting in the terminal',
+  [STATUS.IDLE]: 'Your turn', [STATUS.BACKGROUND]: 'Background work running',
+};
+
+// A session with no hooks: everything comes from its session file and transcript.
+function syncDiscovered(s, r, now) {
+  let changed = false;
+  const file = s.transcript || (s.transcript = transcriptFor(s.id, s.cwd));
+  let size = -1;
+  try { size = fs.statSync(file).size; } catch {}
+  if (file && size !== s.transcriptSize) {
+    s.transcriptSize = size;
+    const act = lastActivity(readTail(file));
+    if (act.tool) { s.toolStep = describeTool(act.tool.name, act.tool.input); setStep(s, s.toolStep, now, act.tool.name); }
+    if (act.text) s.lastMessage = String(act.text).replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (act.todos) s.todos = todosSummary(act.todos);
+    changed = true;
+  }
+  const st = fileStatus(r);
+  if (st && st !== s.status) { s.status = st; s.statusTs = now; changed = true; }
+  const step = WATCH_STEP[s.status] || s.toolStep || 'Working';
+  if (step !== s.step) { s.step = step; s.stepTs = now; changed = true; }
+  return changed;
+}
+
+// A session with hooks: correct our picture when Claude Code says a prompt is no longer open.
+// That covers "Yes" on a long-running command and plan feedback, where no hook event comes.
+// Only PermissionRequest holds: while a PreToolUse question is held the terminal shows no
+// prompt, so Claude Code says "busy" although the question is still unanswered.
+function reconcile(s, r, now) {
+  if (!r.status || r.status === 'waiting' || !r.statusUpdatedAt) return false;
+  let changed = false;
+  for (const p of [...pendings.values()]) {
+    if (p.key === s.key && p.hookEvent === 'PermissionRequest' && r.statusUpdatedAt > p.createdAt + 1000) {
+      p.finish(null, `answered in the terminal (Claude Code says ${r.status})`, { settled: true });
+      changed = true;
+    }
+  }
+  if (!s.pending && (s.status === STATUS.APPROVAL || s.status === STATUS.QUESTION) && r.statusUpdatedAt > s.statusTs + 1000) {
+    s.status = FILE_STATUS[r.status] || STATUS.IDLE;
+    s.step = 'Answered in the terminal';
+    s.statusTs = s.stepTs = now;
+    changed = true;
+  }
+  return changed;
+}
+
+function syncFromClaude(now) {
+  let changed = false;
+  const seen = new Set();
+  for (const r of runningSessions()) {
+    const key = `${NAME}:${r.sessionId}`;
+    seen.add(key);
+    let s = sessions.get(key);
+    if (!s) {
+      s = newSession(key, { session_id: r.sessionId, cwd: r.cwd }, { pid: r.pid, ts: r.startedAt }, NAME);
+      s.source = 'discovered';
+      sessions.set(key, s);
+      changed = true;
+      log(`found a session without hooks: ${key} in ${r.cwd}`);
+    }
+    if (!s.pid) s.pid = r.pid;
+    if (r.name && s.name !== r.name) { s.name = r.name; changed = true; }
+    if (s.ended) continue;
+    changed = (s.source === 'discovered' ? syncDiscovered(s, r, now) : reconcile(s, r, now)) || changed;
+  }
+  // Claude Code removes the file when the session exits.
+  for (const s of sessions.values()) {
+    if (s.source === 'discovered' && !s.ended && !seen.has(s.key)) {
+      s.ended = true; s.status = STATUS.ENDED; s.step = 'Session ended'; s.statusTs = now; changed = true;
+    }
+  }
+  return changed;
 }
 
 function buildOutput(p, decision) {
@@ -270,6 +348,7 @@ async function handleHook(body, res) {
   if (EVENT_LOG) fs.appendFile(EVENT_LOG, JSON.stringify(body) + '\n', () => {});
   if (!input.session_id) return null;
   const s = sessionFor(input, meta);
+  if (s.source === 'discovered') { s.source = 'hooks'; log(`hooks now reporting for ${s.key}`); } // hooks take over
   settleHeld(s, event, input); // first, so the event's own status isn't blocked by a stale card
   applyEvent(s, event, input, meta);
 
@@ -361,8 +440,9 @@ function jumpTo(s) {
 
 // ---------- housekeeping ----------
 setInterval(() => {
-  let changed = false;
   const now = Date.now();
+  let changed = false;
+  try { changed = syncFromClaude(now); } catch (e) { log('reading ~/.claude/sessions failed: ' + e.message); }
   for (const s of sessions.values()) {
     if (!s.ended && !pidAlive(s.pid)) {
       s.ended = true; s.status = STATUS.ENDED; s.step = 'Session ended'; s.statusTs = now; changed = true;

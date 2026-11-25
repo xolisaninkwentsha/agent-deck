@@ -95,6 +95,8 @@ export function newSession(key, input, meta, host) {
     pending: null,
     lastMessage: '',
     transcript: input.transcript_path || null, // read by the daemon to spot answers given in the terminal
+    source: 'hooks',   // or 'discovered': found in ~/.claude/sessions with no hooks reporting (watch-only)
+    name: '',          // Claude Code's own title for the session, when it has one
     pid: meta.pid || null,
     tmuxPane: meta.tmuxPane || null,
     termProgram: meta.termProgram || null,
@@ -105,11 +107,16 @@ export function newSession(key, input, meta, host) {
   };
 }
 
+export function todosSummary(todos) {
+  const active = todos.find((t) => t.status === 'in_progress');
+  return { total: todos.length, done: todos.filter((t) => t.status === 'completed').length, active: active ? short(active.activeForm || active.content, 60) : '' };
+}
+
 function setStatus(s, status, ts) {
   if (ts >= s.statusTs) { s.status = status; s.statusTs = ts; }
 }
 
-function setStep(s, text, ts, tool) {
+export function setStep(s, text, ts, tool) {
   if (!text) return;
   if (ts >= s.stepTs) { s.step = text; s.stepTs = ts; }
   const last = s.steps[s.steps.length - 1];
@@ -150,11 +157,7 @@ export function applyEvent(s, event, input, meta) {
       const tool = input.tool_name;
       setStep(s, describeTool(tool, input.tool_input), ts, tool);
       if (tool !== 'AskUserQuestion' && !s.pending) setStatus(s, STATUS.WORKING, ts);
-      if (tool === 'TodoWrite' && Array.isArray(input.tool_input?.todos)) {
-        const todos = input.tool_input.todos;
-        const active = todos.find((t) => t.status === 'in_progress');
-        s.todos = { total: todos.length, done: todos.filter((t) => t.status === 'completed').length, active: active ? short(active.activeForm || active.content, 60) : '' };
-      }
+      if (tool === 'TodoWrite' && Array.isArray(input.tool_input?.todos)) s.todos = todosSummary(input.tool_input.todos);
       break;
     }
 
@@ -250,7 +253,9 @@ export function progressOf(s) {
 // What the widget receives (no internal timestamps it doesn't need).
 export function publicView(s) {
   return {
-    key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.title,
+    // Claude Code's own session name reads better than the first prompt (which can be a paste).
+    key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.name || s.title,
+    watchOnly: s.source === 'discovered',
     status: s.status, step: s.step, steps: s.steps.slice(-10), progress: progressOf(s),
     background: s.background, subagents: Object.entries(s.subagents).map(([id, a]) => ({ id, ...a })),
     pending: s.pending ? { ...s.pending, resolve: undefined } : null,

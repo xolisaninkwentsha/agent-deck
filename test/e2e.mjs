@@ -12,7 +12,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-'));
 const PORT = 47000 + Math.floor(Math.random() * 900);
 fs.writeFileSync(path.join(HOME, 'config.json'), JSON.stringify({ port: PORT, holdSeconds: 5, name: 'testbox' }));
-const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT) };
+// A fake ~/.claude, so the daemon doesn't pick up the real sessions on this machine.
+const CLAUDE = path.join(HOME, 'claude');
+fs.mkdirSync(path.join(CLAUDE, 'sessions'), { recursive: true });
+const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE };
+const sleepers = []; // stand-ins for running Claude Code processes
+const fakeProcess = () => { const p = spawn('sleep', ['120']); sleepers.push(p); return p; };
+const sessionFile = (pid, fields) => fs.writeFileSync(path.join(CLAUDE, 'sessions', `${pid}.json`), JSON.stringify({ pid, ...fields }));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let passed = 0;
 const ok = (name) => { passed++; console.log('  ✓ ' + name); };
@@ -220,6 +226,67 @@ async function main() {
   await until(() => sess()?.status === 'idle' && sess().step === 'Interrupted in the terminal', 'transcript interrupt noticed', 60);
   ok('"No" in the terminal after the hand-off is picked up from the transcript');
 
+  // 9h. A session with no hooks, found in Claude Code's own session files, shows watch-only.
+  const old = fakeProcess();
+  fs.mkdirSync(path.join(CLAUDE, 'projects', '-work-old-app'), { recursive: true });
+  fs.writeFileSync(path.join(CLAUDE, 'projects', '-work-old-app', 'disc-1.jsonl'), [
+    { type: 'user', message: { role: 'user', content: 'tidy the logs' } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Cleaning up the log handling.' }, { type: 'tool_use', id: 't1', name: 'Edit', input: { file_path: '/work/old-app/logs.py' } }] } },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  const oldFile = (fields) => sessionFile(old.pid, { sessionId: 'disc-1', cwd: '/work/old-app', name: 'tidy-old-logs', startedAt: Date.now(), ...fields });
+  oldFile({ status: 'busy', statusUpdatedAt: Date.now() });
+  const disc = () => snap.sessions.find((x) => x.id === 'disc-1');
+  await until(() => disc()?.step === 'Editing logs.py', 'discovered session', 60);
+  assert.equal(disc().watchOnly, true);
+  assert.equal(disc().title, 'tidy-old-logs');
+  assert.equal(disc().project, 'old-app');
+  assert.equal(disc().status, 'working');
+  assert.equal(disc().lastMessage, 'Cleaning up the log handling.');
+  ok('session without hooks: found in ~/.claude/sessions, watch-only, step from its transcript');
+
+  oldFile({ status: 'waiting', waitingFor: 'permission prompt', statusUpdatedAt: Date.now() });
+  await until(() => disc()?.status === 'approval' && disc().step === 'Needs approval in the terminal', 'watch-only approval', 60);
+  ok('session without hooks: shows when Claude Code waits for a permission in the terminal');
+
+  await hook('observe', { session_id: 'disc-1', cwd: '/work/old-app', hook_event_name: 'UserPromptSubmit', prompt: 'carry on' });
+  await until(() => disc()?.watchOnly === false && disc().status === 'working', 'hooks took over');
+  assert.equal(disc().title, 'tidy-old-logs');
+  old.kill();
+  await until(() => disc()?.status === 'ended', 'discovered session ended', 60);
+  ok('session without hooks: a hook event takes it over; it ends when its process exits');
+
+  // 9i. Claude Code's own status settles a held card that no hook event would clear
+  //     ("Yes" in the terminal on a long-running command, or feedback on a plan).
+  const rec = fakeProcess();
+  const SR = 'sess-r';
+  const rbase = (event, extra = {}) => ({ session_id: SR, cwd: '/work/recon', hook_event_name: event, ...extra });
+  const recFile = (fields) => sessionFile(rec.pid, { sessionId: SR, cwd: '/work/recon', ...fields });
+  const rs = () => snap.sessions.find((x) => x.id === SR);
+  recFile({ status: 'busy', statusUpdatedAt: Date.now() - 5000 });
+  await hook('observe', rbase('UserPromptSubmit', { prompt: 'build it' }));
+  const heldLong = hook('decide', rbase('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'npm run long' }, permission_mode: 'default' }));
+  await until(() => rs()?.pending?.detail === 'npm run long', 'held long command');
+  recFile({ status: 'waiting', waitingFor: 'permission prompt', statusUpdatedAt: Date.now() });
+  await sleep(2500); // a housekeeping tick while Claude Code still shows the prompt
+  assert.ok(rs().pending, 'the card must stay while Claude Code still shows the prompt');
+  recFile({ status: 'busy', statusUpdatedAt: Date.now() });
+  assert.equal((await heldLong).out, '');
+  await until(() => rs()?.pending === null && rs().status === 'working' && rs().step === 'Answered in the terminal', 'settled from Claude Code status', 60);
+  ok('a held card clears when Claude Code says its prompt is no longer open');
+
+  // 9j. A card left "waiting in the terminal" clears when Claude Code says it's idle again.
+  const heldRel = hook('decide', rbase('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'npm run other' }, permission_mode: 'default' }));
+  await until(() => rs()?.pending?.detail === 'npm run other', 'held other command');
+  recFile({ status: 'waiting', waitingFor: 'permission prompt', statusUpdatedAt: Date.now() });
+  ws.send(JSON.stringify({ type: 'release', pendingId: rs().pending.id }));
+  await heldRel;
+  await until(() => rs()?.step === 'Waiting for you in the terminal', 'released to terminal');
+  await sleep(1200);
+  recFile({ status: 'idle', statusUpdatedAt: Date.now() });
+  await until(() => rs()?.status === 'idle' && rs().step === 'Answered in the terminal', 'cleared from Claude Code status', 60);
+  ok('a card waiting in the terminal clears when Claude Code says the session is idle');
+  rec.kill();
+
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));
   await hook('observe', base('SubagentStart', { agent_id: 'ag1', agent_type: 'Explore' }));
@@ -252,12 +319,14 @@ async function main() {
   ok('session end shows as ended');
 
   ws.close();
+  for (const p of sleepers) p.kill();
   const pid = Number(fs.readFileSync(path.join(HOME, 'daemon.pid'), 'utf8'));
   process.kill(pid, 'SIGTERM');
   console.log(`\n${passed} checks passed`);
 }
 
 main().catch((e) => {
+  for (const p of sleepers) p.kill();
   console.error('\nFAILED:', e.message);
   try { process.kill(Number(fs.readFileSync(path.join(HOME, 'daemon.pid'), 'utf8')), 'SIGTERM'); } catch {}
   console.error(fs.existsSync(path.join(HOME, 'daemon.log')) ? fs.readFileSync(path.join(HOME, 'daemon.log'), 'utf8').slice(-3000) : '');

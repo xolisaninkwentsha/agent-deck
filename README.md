@@ -39,7 +39,7 @@ agent-deck widget           # opens the panel
 agent-deck autostart        # optional: open the panel when you log in
 ```
 
-Then **restart any Claude Code sessions that were already open**. Hooks are read when a session starts, so older sessions won't appear until they're restarted.
+Sessions that were already open show up straight away as **watch only** (see below). Hooks are read when a session starts, so restart a session to answer its approvals and questions from the panel.
 
 ## See the Ubuntu machine from the Mac (or the other way round)
 
@@ -68,12 +68,22 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
 
 - **Claude Code shows its normal prompt in the terminal at the same time**, so answer wherever you are. If you answer in the panel, the terminal prompt closes and Claude carries on.
 - For questions this holds in the default, accept-edits, plan and auto permission modes (checked with Claude Code 2.1.332). In any other mode (for example bypass permissions) the panel gets the question *first*, and the terminal only shows it after you click **Terminal** or the hold runs out.
-- If you answer in the terminal instead, the card clears by itself. "No" or Esc clears it straight away. After "Yes" it clears when the tool finishes, because Claude Code reports nothing sooner, so a long-running command keeps its card until then and clicking it does nothing.
+- If you answer in the terminal instead, the card clears by itself within a couple of seconds.
 - If nobody answers in the panel within **5 minutes** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer. (A question in a mode where the panel gets it first is held for at most 90 seconds.)
 - If no panel is open, nothing is held: Claude Code behaves exactly as before.
 - The **shield** button in the panel header turns this off. With it off, the panel only watches and every prompt goes to the terminal.
 
 "Always" applies the rule Claude Code suggests (for example "always allow `npm run test`"), the same as choosing "Yes, don't ask again" in the terminal.
+
+## Sessions that started before Agent Deck
+
+Claude Code keeps a small file per running session in `~/.claude/sessions/`, with its folder, its title and whether it's busy, idle or waiting for you. The daemon reads these every 2 seconds:
+
+- **Sessions without hooks** (started before `agent-deck install`, or with hooks pointing elsewhere) get a card marked **watch only**. It shows the session's title, status (including "Needs approval in the terminal"), the step it's on (from the end of its transcript) and task progress. Answer those prompts in the terminal; restart the session to answer from the panel. The card turns into a normal one as soon as the session's hooks report.
+- **All cards** use Claude Code's own session title, which reads better than the first prompt.
+- It also confirms when you've answered a prompt in the terminal, so the panel's card clears even when no hook event follows (for example "Yes" on a long-running command, or feedback on a plan).
+
+The file isn't a documented Claude Code format (checked with 2.1.332). If it changes, those extras stop and the rest of Agent Deck works as before.
 
 ## Ubuntu notes
 
