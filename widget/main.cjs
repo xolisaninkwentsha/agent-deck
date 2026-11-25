@@ -311,14 +311,15 @@ ipcMain.handle('tailscale-devices', async () => {
   return { ok: true, devices: list.sort((a, b) => Number(b.agentDeck) - Number(a.agentDeck) || Number(b.online) - Number(a.online)) };
 });
 // Ask that machine to let this panel in; its panel shows Allow / Deny. Resolves when answered.
-ipcMain.handle('pair', async (_e, ip) => {
+ipcMain.handle('pair', async (_e, ip, letBack) => {
   const st = await (await tailscale()).tsStatus();
   const peer = st?.peers.find((p) => v4Of(p) === ip && p.userId === st.self.userId && !p.tagged);
   if (!peer) return { ok: false, error: 'Not one of your Tailscale devices.' };
   const cfg = config.loadConfig();
   const r = await fetch(`http://${ip}:${cfg.port}/pair`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ shared: !config.isLoopback(cfg.bind), port: cfg.port }), signal: AbortSignal.timeout(150000),
+    // "shared" offers the other way round; only when you ticked it here and this machine is shared.
+    body: JSON.stringify({ shared: letBack === true && !config.isLoopback(cfg.bind), port: cfg.port }), signal: AbortSignal.timeout(150000),
   }).then((x) => (x.ok ? x.json() : { approved: false, reason: `refused (${x.status})` }), () => null);
   if (!r) return { ok: false, error: `Couldn't reach Agent Deck on ${peer.dns}. Is "Share this machine" on there?` };
   if (!r.approved) return { ok: false, error: `${peer.dns}: ${r.reason || 'not allowed'}` };

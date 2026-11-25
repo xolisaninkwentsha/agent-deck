@@ -48,14 +48,14 @@ Sessions that were already open show up straight away as **watch only** (see bel
 Both machines need Tailscale signed in to the same account, and Agent Deck.
 
 1. On the machine you want to *watch* (e.g. Ubuntu): **Settings → Share this machine** on.
-2. On the other one (e.g. the Mac): **Settings → Your devices on Tailscale** lists your devices where Agent Deck is shared. Click **Connect**.
-3. On the watched machine, a card and a notification ask "*Mac* wants to see this machine". Click **Allow**. If the Mac is shared too, tick **Also show its sessions here** to connect both ways in one go.
+2. On the other one (e.g. the Mac): **Settings → Your devices on Tailscale** lists your devices where Agent Deck is shared. Click **Connect**. If the Mac is shared too, you can tick **both ways** first to offer the reverse.
+3. On the watched machine, a card and a notification ask "*Mac* wants to see this machine". Click **Allow**. If the Mac offered both ways, the card also has **Also show its sessions here**. Nothing is granted in reverse unless both sides ticked it.
 
 How it stays safe:
 - **Who may ask:** Agent Deck asks Tailscale (`tailscale whois`) who is connecting. Only your own devices (the same Tailscale user) may ask. Tagged servers and other people's devices are refused, and so is anything Tailscale can't vouch for.
 - **No token for paired devices:** a paired device connects without a token, because its Tailscale identity is checked on every connection.
 - **Who can approve:** only a panel on the watched machine can allow a request or remove a device. Another machine's panel never even sees the requests.
-- **What Allow grants:** a paired machine sees your sessions and agents and can answer their approvals and questions, the same as a token.
+- **What Allow grants:** trust goes to the **device**, not to one app. Anything running on a paired device can see your sessions and agents here and answer their approvals and questions. With a token, a program on that machine would first have to read Agent Deck's config. So pair only devices you'd trust at your keyboard.
 - **Removing:** **Settings → Can see this machine** lists paired devices. **Remove** disconnects one at once.
 - **Repeat requests:** after a Deny, the same device can't ask again for 10 minutes. Paired devices are kept in `~/.agent-deck/devices.json`.
 

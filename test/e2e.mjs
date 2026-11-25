@@ -575,6 +575,19 @@ async function main() {
       local2.send(JSON.stringify({ type: 'remove-device', id: 'mac-node' }));
       assert.equal(await closed, 4001, 'removing a device disconnects it');
       assert.equal((await wsResult(`ws://${lan}:${PORT2}/ws`)).status, 401, 'and it can\'t come back');
+      // The return leg ("both ways"): only this machine's panel may let a device in, or remove one.
+      const devicesNow = () => JSON.parse(fs.readFileSync(path.join(HOME2, 'devices.json'), 'utf8')).map((x) => x.id);
+      remote2.send(JSON.stringify({ type: 'allow-device', ip: lan }));
+      await sleep(500);
+      assert.deepEqual(devicesNow(), [], 'another machine\'s panel can\'t add a device');
+      local2.send(JSON.stringify({ type: 'allow-device', ip: lan }));
+      await until2(() => devicesNow().length === 1, 'local allow-device');
+      assert.deepEqual(devicesNow(), ['mac-node'], 'checked with Tailscale, then allowed');
+      remote2.send(JSON.stringify({ type: 'remove-device', id: 'mac-node' }));
+      await sleep(500);
+      assert.deepEqual(devicesNow(), ['mac-node'], 'another machine\'s panel can\'t remove one');
+      local2.send(JSON.stringify({ type: 'remove-device', id: 'mac-node' }));
+      await until2(() => devicesNow().length === 0, 'local remove-device');
       answer = pairPost();
       await until2(() => last2.local?.pairRequests?.length === 1, 'second request');
       local2.send(JSON.stringify({ type: 'pair-decide', id: last2.local.pairRequests[0].id, allow: false }));

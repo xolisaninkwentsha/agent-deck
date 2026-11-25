@@ -147,11 +147,12 @@ async function loadDevices() {
   state.settingsDirty = true; render();
 }
 async function pairWith(dev) {
+  const letBack = Boolean(state.cfg.shareAddress && state.ts.letBack?.[dev.ip]); // you ticked "and let it see this one"
   state.ts.pairing = { ...state.ts.pairing, [dev.ip]: 'waiting' };
   state.settingsDirty = true; render();
-  const r = await window.deck.pair(dev.ip);
-  // It allowed this machine and wants to see this one too: let it in here (checked with Tailscale by the daemon).
-  if (r.ok && r.back) send(localHub(), { type: 'allow-device', ip: dev.ip });
+  const r = await window.deck.pair(dev.ip, letBack);
+  // Only what you ticked here: it accepted, so let it in (the daemon checks it with Tailscale).
+  if (r.ok && r.back && letBack) send(localHub(), { type: 'allow-device', ip: dev.ip });
   state.ts.pairing = { ...state.ts.pairing, [dev.ip]: r.ok ? '' : r.error };
   if (r.ok) await loadDevices(); else { state.settingsDirty = true; render(); }
 }
@@ -170,8 +171,12 @@ function tailscaleRows(row) {
           : d.agentDeck ? 'Agent Deck is shared there'
             : d.outdated ? 'Agent Deck there is older: git pull and restart it there'
               : 'Agent Deck not found: turn on "Share this machine" there';
-    rows.push(row(d.dns, err && err !== 'waiting' ? err : hint,
-      d.online && d.agentDeck && !d.added && !waiting ? h('button', { class: 'btn allow', text: 'Connect', onclick: () => pairWith(d) }) : null));
+    const connectable = d.online && d.agentDeck && !d.added && !waiting;
+    rows.push(row(d.dns, err && err !== 'waiting' ? err : hint, connectable ? h('div', { class: 'connect' },
+      // Offer the other way round only when you tick it (and this machine is shared, so it could connect).
+      state.cfg.shareAddress ? h('label', { class: 'pair-back', title: `Also let ${d.dns} see this machine` },
+        h('input', { type: 'checkbox', checked: t.letBack?.[d.ip] ? 'checked' : null, onchange: (e) => { t.letBack = { ...t.letBack, [d.ip]: e.target.checked }; } }), ' both ways') : null,
+      h('button', { class: 'btn allow', text: 'Connect', onclick: () => pairWith(d) })) : null));
   }
   return rows;
 }
@@ -191,14 +196,17 @@ function notifyPairRequests(hub) {
     window.deck.notify(`${r.name} wants to see this machine`, 'Open Agent Deck to allow or deny it.', {});
   }
 }
+// "Also show its sessions here" only when that machine is shared and not already in this panel
+// (adding it again would replace a working entry, e.g. one with a token).
+const canAddBack = (r) => r.shared && !state.hubs.some((x) => !x.local && x.url === `ws://${r.ip}:${r.port}/ws`);
 function pairCards() {
   const hub = localHub();
   return (hub?.pairRequests || []).map((r) => {
-    if (!(r.id in state.pairBack)) state.pairBack[r.id] = r.shared;
+    if (!(r.id in state.pairBack)) state.pairBack[r.id] = true;
     return h('div', { class: 'card pair' },
       h('div', { class: 'pair-title', text: `${r.name} wants to see this machine` }),
-      h('div', { class: 'set-hint', text: `${r.login} on Tailscale. If you allow it, its Agent Deck sees your sessions and agents here and can answer their approvals and questions.` }),
-      r.shared ? h('label', { class: 'pair-back' },
+      h('div', { class: 'set-hint', text: `${r.login} on Tailscale. If you allow it, anything running on that device can see your sessions and agents here and answer their approvals and questions.` }),
+      canAddBack(r) ? h('label', { class: 'pair-back' },
         h('input', { type: 'checkbox', checked: state.pairBack[r.id] ? 'checked' : null, onchange: (e) => { state.pairBack[r.id] = e.target.checked; } }),
         ` Also show ${r.dns}'s sessions here`) : null,
       h('div', { class: 'btns' },
@@ -207,7 +215,7 @@ function pairCards() {
   });
 }
 function decidePair(r, allow) {
-  const back = allow && r.shared && state.pairBack[r.id];
+  const back = allow && canAddBack(r) && state.pairBack[r.id];
   send(localHub(), { type: 'pair-decide', id: r.id, allow, back });
   if (back) window.deck.addHub(r.dns, `${r.ip}:${r.port}`, ''); // it allows this machine in return
 }

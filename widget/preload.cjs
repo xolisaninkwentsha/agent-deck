@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('deck', {
   copyShareLine: () => ipcRenderer.send('copy-share-line'),
   share: (on) => ipcRenderer.invoke('share', Boolean(on)), // restarts the daemon; resolves { ok, error }
   tailscaleDevices: () => ipcRenderer.invoke('tailscale-devices'),
-  pair: (ip) => ipcRenderer.invoke('pair', String(ip)), // resolves when the other machine answers
+  pair: (ip, letBack) => ipcRenderer.invoke('pair', String(ip), Boolean(letBack)), // resolves when the other machine answers
   notify: (title, body, target) => ipcRenderer.send('notify', { title, body, target }),
   onJump: (fn) => ipcRenderer.on('jump', (_e, target) => fn(target)), // a notification was clicked
   quit: () => ipcRenderer.send('quit'),
