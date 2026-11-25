@@ -10,7 +10,8 @@ CDP=${AGENT_DECK_LIVE_CDP:-9339}
 export AGENT_DECK_HOME="$WORK/home"
 mkdir -p "$WORK/home" "$WORK/drv/cmds" "$WORK/proj"
 # The test panel opens below where your own panel sits by default (top right of the main screen).
-[ -f "$WORK/home/config.json" ] || printf '{"port":%s,"holdSeconds":25,"name":"livetest","window":{"x":1544,"y":600}}\n' "$PORT" > "$WORK/home/config.json"
+# OTLP on 4319 so the test daemon never takes your real daemon's 4318.
+[ -f "$WORK/home/config.json" ] || printf '{"port":%s,"holdSeconds":25,"name":"livetest","window":{"x":1544,"y":600},"otlpPort":4319}\n' "$PORT" > "$WORK/home/config.json"
 n() { date +%s%N; }
 
 case "${1:-help}" in

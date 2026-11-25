@@ -396,7 +396,7 @@ function when(ts) {
 function agentLine(a) {
   if (a.status === 'not_responding') return `No heartbeat for ${ago(a.lastHeartbeat)} (expected every ${span(a.heartbeat * 1000)})`;
   if (a.status === 'error' && a.lastError) return a.lastError.message;
-  if (a.job) return a.job.job + (a.step ? `: ${a.step}` : a.job.detail ? `: ${a.job.detail}` : '') + (a.jobsRunning > 1 ? ` (+${a.jobsRunning - 1})` : '');
+  if (a.job) return a.job.job + (a.step ? ` · ${a.step}` : a.job.detail ? ` · ${a.job.detail}` : '') + (a.jobsRunning > 1 ? ` (+${a.jobsRunning - 1})` : '');
   if (a.nextJob) return `Idle · next: ${a.nextJob.job} ${when(a.nextJob.nextRun)}`;
   return a.step || a.description || 'Idle';
 }
@@ -421,7 +421,17 @@ function agentDetails(a) {
         h('span', { class: 'd-st', text: ago(j.at) + (j.durationMs != null ? ` · ${span(j.durationMs)}` : '') })));
     }
   }
-  if (a.lastError) {
+  if (a.tokensToday && a.tokensToday.total) {
+    const t = a.tokensToday;
+    rows.push(h('div', { class: 'd-head', text: 'Tokens today' }));
+    rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: `${t.total.toLocaleString()} (in ${t.input.toLocaleString()} · out ${t.output.toLocaleString()})` })));
+    for (const [model, n] of t.models.slice(0, 4)) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: model }), h('span', { class: 'd-st', text: n.toLocaleString() })));
+  }
+  if (a.errors && a.errors.length) {
+    rows.push(h('div', { class: 'd-head', text: 'Last errors' }));
+    for (const e of a.errors) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: e.type + (e.job ? ` · ${e.job}` : '') }), h('span', { class: 'd-st', text: ago(e.at) })));
+    if (a.crashLoop && a.lastError) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: a.lastError.message })));
+  } else if (a.lastError) {
     rows.push(h('div', { class: 'd-head', text: 'Last error' }));
     rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', title: a.lastError.message, text: a.lastError.message }), h('span', { class: 'd-st', text: ago(a.lastError.at) })));
   }
@@ -447,11 +457,12 @@ function agentCard({ hub, a }) {
         h('div', { class: 'name', title: a.displayName, text: a.displayName }),
         h('div', { class: 'step', title: agentLine(a), text: agentLine(a) }),
         h('div', { class: 'meta' },
-          h('span', { class: `status ag-${a.status}`, text: AGENT_LABEL[a.status] || a.status }),
-          a.waiting.length ? h('span', { class: 'ag-wait', text: `${a.waiting.length} waiting on you` }) : null,
+          h('span', { class: `status ag-${a.status}`, text: (AGENT_LABEL[a.status] || a.status) + (a.status === 'waiting' ? ` · ${a.waiting.length}` : '') }),
+          a.waiting.length && a.status !== 'waiting' ? h('span', { class: 'ag-wait', text: `${a.waiting.length} waiting` }) : null,
           last)),
       h('div', { class: 'side' },
         state.hubs.length > 1 ? h('span', { class: 'host', text: hub.name }) : null,
+        a.source === 'otlp' ? h('span', { class: 'watch', text: 'OTLP', title: 'Reports through OpenTelemetry' }) : null,
         h('div', { class: 'side-btns' },
           h('button', { class: 'icon small', title: 'Hide this agent until it reports again', html: ICONS.close, onclick: (e) => { e.stopPropagation(); send(hub, { type: 'dismiss-agent', key: a.key }); } })))),
     open ? agentDetails(a) : null);

@@ -233,3 +233,5 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .d-text.link:hover { text-decoration: underline; }
 .d-type.bad, .d-text.bad { color: var(--error); }
 .mini.square { border-radius: 2px; }
+.meta .status, .meta .ag-wait { white-space: nowrap; flex: none; }
+.ag-last { min-width: 0; }

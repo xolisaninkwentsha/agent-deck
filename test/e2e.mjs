@@ -7,11 +7,13 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
+import zlib from 'node:zlib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-'));
 const PORT = 47000 + Math.floor(Math.random() * 900);
-fs.writeFileSync(path.join(HOME, 'config.json'), JSON.stringify({ port: PORT, holdSeconds: 5, name: 'testbox' }));
+const OTLP_PORT = PORT + 3; // the test daemon's OpenTelemetry receiver (never the real 4318)
+fs.writeFileSync(path.join(HOME, 'config.json'), JSON.stringify({ port: PORT, holdSeconds: 5, name: 'testbox', otlpPort: OTLP_PORT, otlpHeartbeatSeconds: 1 }));
 // A fake ~/.claude, so the daemon doesn't pick up the real sessions on this machine.
 const CLAUDE = path.join(HOME, 'claude');
 fs.mkdirSync(path.join(CLAUDE, 'sessions'), { recursive: true });
@@ -465,7 +467,7 @@ async function main() {
   } else {
     const HOME2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-remote-'));
     const PORT2 = PORT + 1;
-    fs.writeFileSync(path.join(HOME2, 'config.json'), JSON.stringify({ port: PORT2, bind: lan, token: 'x'.repeat(32), name: 'remote-test' }));
+    fs.writeFileSync(path.join(HOME2, 'config.json'), JSON.stringify({ port: PORT2, bind: lan, token: 'x'.repeat(32), name: 'remote-test', otlpPort: PORT + 4 }));
     const d2 = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: { ...env, AGENT_DECK_HOME: HOME2, AGENT_DECK_PORT: String(PORT2) } });
     try {
       for (let i = 0; i < 40; i++) { try { await fetch(`http://${lan}:${PORT2}/health`); break; } catch { await sleep(100); } }
@@ -473,6 +475,12 @@ async function main() {
       const hookRes = await fetch(`http://${lan}:${PORT2}/hook`, { method: 'POST', body: '{}' });
       assert.equal(hookRes.status, 403);
       assert.equal((await agentPost({ agent: 'local-ok', event: 'start' }, '127.0.0.1', PORT2)).ok, true);
+      // The OpenTelemetry receiver stays on loopback even when the daemon is shared on the LAN.
+      const otlpTo = (host) => fetch(`http://${host}:${PORT + 4}/v1/traces`, { method: 'POST', headers: { 'content-type': 'application/x-protobuf' }, body: Buffer.alloc(0) })
+        .then((x) => x.status, () => 'refused');
+      for (let i = 0; i < 20 && (await otlpTo('127.0.0.1')) !== 200; i++) await sleep(100);
+      assert.equal(await otlpTo('127.0.0.1'), 200);
+      assert.equal(await otlpTo(lan), 'refused', 'OTLP must not listen on the LAN address');
     } finally { d2.kill(); }
     ok('a request from another machine to /agent or /hook is refused (403); loopback is accepted');
   }
@@ -495,6 +503,93 @@ async function main() {
   assert.equal(await wsOpens('file://'), true, 'the panel (file://) must');
   assert.equal(await wsOpens(null), true, 'local tools without an Origin must');
   ok('web pages are refused: POSTs with an Origin or a non-JSON body, WebSockets from web origins');
+
+  // 9r. OpenTelemetry (OTLP/HTTP) receiver.
+  const otlpPost = (url, body, { type = 'application/json', gzip = false, headers = {} } = {}) => {
+    let data = type === 'application/json' && !Buffer.isBuffer(body) && typeof body !== 'string' ? JSON.stringify(body) : body;
+    if (gzip) data = zlib.gzipSync(data);
+    return fetch(`http://127.0.0.1:${OTLP_PORT}${url}`, { method: 'POST', headers: { 'content-type': type, ...(gzip ? { 'content-encoding': 'gzip' } : {}), ...headers }, body: data });
+  };
+  const otlpAttrs = (o) => Object.entries(o).map(([key, v]) => ({ key, value: typeof v === 'number' ? { intValue: String(v) } : { stringValue: String(v) } }));
+  const nanos = (ms) => String(BigInt(Math.round(ms)) * 1000000n);
+  const resource = (service, extra = {}) => ({ attributes: otlpAttrs({ 'service.name': service, ...extra }) });
+  const tracesBody = (service, spans) => ({ resourceSpans: [{ resource: resource(service), scopeSpans: [{ scope: { name: 'test' }, spans }] }] });
+  const jspan = ({ trace, id, parent = '', name, attrs = {}, start = Date.now() - 2000, end = Date.now(), status = 0, events = [] }) => ({
+    traceId: trace, spanId: id, parentSpanId: parent, name, kind: 1, startTimeUnixNano: nanos(start), endTimeUnixNano: nanos(end),
+    attributes: otlpAttrs(attrs), events: events.map((e) => ({ name: e.name, timeUnixNano: nanos(end), attributes: otlpAttrs(e.attrs || {}) })), status: { code: status },
+  });
+  const ot = (service) => snap.agents?.find((a) => a.key.endsWith(`:otlp:${service}`));
+
+  // Real protobuf from the official Python exporter (test/fixtures/otlp/make_fixtures.py).
+  const FIX = path.join(ROOT, 'test', 'fixtures', 'otlp');
+  for (const sig of ['traces', 'metrics', 'logs']) {
+    const res = await otlpPost(`/v1/${sig}`, fs.readFileSync(path.join(FIX, `${sig}.bin`)), { type: 'application/x-protobuf' });
+    assert.equal(res.status, 200, `${sig} fixture`);
+    assert.equal(res.headers.get('content-type'), 'application/x-protobuf');
+    assert.equal((await res.arrayBuffer()).byteLength, 0, 'an empty Export*ServiceResponse');
+  }
+  await until(() => ot('fixture-agent')?.recent.length === 2 && ot('fixture-agent').errors.length === 2, 'fixture agent', 60);
+  let fx = ot('fixture-agent');
+  assert.equal(fx.source, 'otlp');
+  assert.equal(fx.description, 'v1.2.3');
+  assert.deepEqual(fx.recent.map((j) => [j.job, j.result, j.summary]), [['weekly', 'error', 'PermissionError'], ['daily', 'ok', '']]);
+  assert.deepEqual(fx.waiting.map((w) => [w.id, w.title, w.link]), [['bill-42', 'Approve supplier bill', 'https://chat.google.com/room/FIXTURE/thread-1']]);
+  assert.deepEqual([fx.tokensToday.input, fx.tokensToday.output, fx.tokensToday.models[0][0]], [1200, 340, 'claude-sonnet-5-5']);
+  assert.deepEqual(fx.errors.map((e) => e.type), ['TimeoutError', 'PermissionError']);
+  await sleep(700); // state.json is written half a second after a change
+  assert.ok(!/SECRET/.test(fs.readFileSync(path.join(HOME, 'state.json'), 'utf8')), 'no message, body or stacktrace text may be stored');
+  ok('OTLP protobuf from the real Python exporter: jobs, outcome, waiting link, tokens, error types; no message text stored');
+
+  // A job seen while it runs (children carry job.name), then its root ends it. JSON, partly gzip.
+  const T1 = 'a1'.repeat(16), ROOT1 = 'b1'.repeat(8);
+  assert.equal((await otlpPost('/v1/traces', tracesBody('json-agent', [
+    jspan({ trace: T1, id: 'c1'.repeat(8), parent: ROOT1, name: 'chat claude-haiku-5-5', attrs: { 'job.name': 'sync', 'gen_ai.operation.name': 'chat', 'gen_ai.request.model': 'claude-haiku-5-5', 'gen_ai.usage.prompt_tokens': 500, 'gen_ai.usage.completion_tokens': 20 } }),
+    jspan({ trace: T1, id: 'c2'.repeat(8), parent: ROOT1, name: 'execute_tool search_crm', attrs: { 'job.name': 'sync', 'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': 'search_crm' }, events: [{ name: 'approval.requested', attrs: { 'approval.id': 'draft-7', 'approval.title': 'Send draft to investor', link: 'https://chat.google.com/room/X/thread-9' } }] }),
+  ]))).status, 200);
+  await until(() => ot('json-agent')?.status === 'waiting' && ot('json-agent').job?.job === 'sync', 'running job seen');
+  assert.equal(ot('json-agent').step, 'last tool: search_crm');
+  assert.equal(ot('json-agent').tokensToday.total, 520, 'older gen_ai.usage.prompt/completion_tokens names count too');
+  assert.equal((await otlpPost('/v1/traces', tracesBody('json-agent', [
+    jspan({ trace: T1, id: ROOT1, name: 'invoke_agent sync', start: Date.now() - 5000, attrs: { 'job.name': 'sync', 'gen_ai.operation.name': 'invoke_agent', 'gen_ai.usage.input_tokens': 500, 'gen_ai.usage.output_tokens': 20 }, events: [{ name: 'approval.granted', attrs: { 'approval.id': 'draft-7' } }] }),
+  ]), { gzip: true })).status, 200);
+  await until(() => ot('json-agent')?.status === 'idle' && ot('json-agent').recent[0]?.job === 'sync', 'job finished');
+  assert.ok(ot('json-agent').recent[0].durationMs >= 4900);
+  assert.equal(ot('json-agent').tokensToday.total, 520, 'the invoke_agent aggregate is not counted twice');
+  await otlpPost('/v1/traces', tracesBody('json-agent', [jspan({ trace: T1, id: 'c3'.repeat(8), parent: ROOT1, name: 'execute_tool late', attrs: { 'job.name': 'sync', 'gen_ai.tool.name': 'late' } })]));
+  await sleep(300);
+  assert.equal(ot('json-agent').jobsRunning, 0, 'a child arriving after its job ended must not reopen it');
+  await otlpPost('/v1/traces', tracesBody('json-agent', [jspan({ trace: 'd1'.repeat(16), id: 'e1'.repeat(8), name: 'chat claude-haiku-5-5', attrs: { 'gen_ai.operation.name': 'chat' } })]));
+  await sleep(300);
+  assert.equal(ot('json-agent').recent.length, 1, 'a standalone model call is not a job');
+  ok('OTLP JSON (+gzip): running job with last tool, waiting from span events, finish, tolerant token names, no double counting');
+
+  // Liveness from a heartbeat counter: alive only while it advances; restarts detected.
+  const hbBody = (value, start, instance = 'inst-1') => ({ resourceMetrics: [{ resource: resource('hb-agent', { 'service.instance.id': instance }), scopeMetrics: [{ metrics: [
+    { name: 'agent.heartbeat', sum: { isMonotonic: true, aggregationTemporality: 2, dataPoints: [{ asInt: String(value), startTimeUnixNano: nanos(start), timeUnixNano: nanos(Date.now()) }] } },
+  ] }] }] });
+  const hbStart = Date.now() - 60000;
+  await otlpPost('/v1/metrics', hbBody(5, hbStart));
+  await until(() => ot('hb-agent')?.heartbeat === 1 && ot('hb-agent').status === 'idle', 'heartbeat seen');
+  const stuck = setInterval(() => otlpPost('/v1/metrics', hbBody(5, hbStart)).catch(() => {}), 500); // exporter thread alive, loop hung
+  await until(() => ot('hb-agent')?.status === 'not_responding', 'a heartbeat that stops advancing = not responding', 80);
+  clearInterval(stuck);
+  await otlpPost('/v1/metrics', hbBody(6, hbStart));
+  await until(() => ot('hb-agent')?.status !== 'not_responding', 'back once it advances');
+  for (let i = 1; i <= 3; i++) await otlpPost('/v1/metrics', hbBody(1, Date.now() - 1000 * i, `inst-r${i}`));
+  await until(() => ot('hb-agent')?.status === 'error' && /Restarting repeatedly/.test(ot('hb-agent').lastError?.message), 'crash loop', 60);
+  ok('OTLP liveness: a heartbeat that stops advancing shows not responding; 3 restarts in 10 min show an error');
+
+  // Refusals, bad bodies, ignored services.
+  assert.equal((await otlpPost('/v1/traces', tracesBody('web', []), { headers: { origin: 'https://evil.example' } })).status, 403);
+  assert.equal((await otlpPost('/v1/traces', 'x', { type: 'text/plain' })).status, 415);
+  assert.equal((await otlpPost('/v1/other', {})).status, 404);
+  assert.equal((await fetch(`http://127.0.0.1:${OTLP_PORT}/v1/traces`)).status, 405);
+  assert.equal((await otlpPost('/v1/traces', Buffer.from([0x0a, 0xff, 0xff]), { type: 'application/x-protobuf' })).status, 400);
+  assert.equal((await otlpPost('/v1/traces', '{not json')).status, 400);
+  await otlpPost('/v1/traces', tracesBody('claude-code', [jspan({ trace: 'f1'.repeat(16), id: 'f2'.repeat(8), name: 'invoke_agent x', attrs: { 'job.name': 'x' } })]));
+  await sleep(300);
+  assert.equal(ot('claude-code'), undefined);
+  ok('OTLP refuses web pages (403), other types (415), paths (404), GETs (405), bad bodies (400); ignores claude-code');
 
   // 9q. At most 100 agents.
   const names = Array.from({ length: 100 }, (_, i) => `cap-${i}`);

@@ -110,6 +110,61 @@ deck.error("Xero sign-in expired")
 - **Under the hood:** `POST http://127.0.0.1:47615/agent` with JSON `{agent, event, ...}`; only requests from this machine are accepted. Events: `start` (name, description, heartbeat, cwd), `heartbeat`, `job_start` (job, detail), `step` (text), `job_end` (job, result ok|error, summary), `waiting` (id, title, link), `resolved` (id), `schedule` (list of {job, next_run}), `error` (message).
 - **To see it** without real agents: `node test/demo.mjs` adds two demo agents (one waiting on you, one that stops responding).
 
+## OpenTelemetry agents
+
+Any agent that exports OpenTelemetry over OTLP/HTTP shows up as a service-agent card, one per `service.name`, marked **OTLP**. The daemon listens on **`localhost:4318`**, the exporters' default endpoint, so the standard SDK setup works unchanged. It accepts `/v1/traces`, `/v1/metrics` and `/v1/logs`, in protobuf or JSON, optionally gzip.
+
+- **Access:** only programs on this machine are accepted, even when the daemon is shared with another computer. Requests from web pages are refused.
+- **Settings:** `otlpPort` changes the port (`0` turns it off). Claude Code's own telemetry (`service.name` `claude-code`) is ignored, since its sessions already have cards (`otlpIgnoreServices`).
+
+Python setup, the standard SDK and exporter (`pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http`):
+
+```python
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+
+resource = Resource.create({"service.name": "finance-agent", "service.version": "1.4.0"})
+tracer_provider = TracerProvider(resource=resource)
+tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))      # http://localhost:4318
+tracer = tracer_provider.get_tracer("finance-agent")
+
+# In the long-running process only (not in cron jobs): the main loop's own pulse.
+meter_provider = MeterProvider(resource=resource, metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter())])
+heartbeat = meter_provider.get_meter("finance-agent").create_counter("agent.heartbeat")
+# ...each time round the main loop: heartbeat.add(1)
+
+# A job: mark it, and put job.name on its child spans too so it shows while it runs.
+with tracer.start_as_current_span("invoke_agent daily", attributes={"job.name": "daily", "gen_ai.operation.name": "invoke_agent"}):
+    with tracer.start_as_current_span("chat claude-sonnet-5-5", attributes={"job.name": "daily", "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": "claude-sonnet-5-5"}) as s:
+        response = client.messages.create(...)
+        s.set_attribute("gen_ai.usage.input_tokens", response.usage.input_tokens)
+        s.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+    with tracer.start_as_current_span("execute_tool xero_lookup", attributes={"job.name": "daily", "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": "xero_lookup"}) as s:
+        ...
+        s.add_event("waiting", {"waiting.id": "bill-42", "waiting.title": "Approve supplier bill", "url.full": thread_url})
+```
+
+What the card reads:
+
+| Card shows | Comes from |
+| --- | --- |
+| **Jobs** | spans marked with `job.name` (or `gen_ai.operation.name = invoke_agent`). The job ends when its root span arrives: ok, or failed with `error.type` / the exception's type. Its child spans show it as running, with the **last tool** that finished (`gen_ai.tool.name`). Standalone model calls aren't jobs. |
+| **Waiting on you** | span events (or log events) named `waiting`, `approval.requested` or `human_input.requested`, with `waiting.id`/`approval.id`, `waiting.title`/`approval.title` and a link in `url.full`/`link`. Events named `resolved`, `approval.granted`, `approval.denied` or `human_input.received` with the same id remove them. Otherwise they disappear after 7 days. |
+| **Tokens today** | `gen_ai.usage.input_tokens`/`output_tokens` (older `prompt_tokens`/`completion_tokens` work too), per model. `invoke_agent` totals aren't counted twice. |
+| **Not responding** | a metric named `*heartbeat*` that hasn't **gone up** for 3 minutes (`otlpHeartbeatSeconds` × 3), with a notification. Because the SDK exports from its own thread, a hung main loop keeps exporting the same value; that counts as not responding. |
+| **Error** | failed jobs and ERROR log records (by type only). **3+ restarts in 10 minutes** (seen as a new heartbeat start time or `service.instance.id`) shows "restarting repeatedly", which catches a crash loop that systemd keeps restarting. |
+
+- **Waiting events:** spans are exported only when they end, so put a waiting event on a short span (as above), not on the job's own span, or it only appears when the whole job finishes.
+- **GenAI names:** the GenAI conventions are still in development. Newer names are tried first and older ones are accepted; a missing attribute just means less detail.
+- **Metadata only:** the receiver never stores span or status messages, log bodies, or `gen_ai.*` message content. Still, don't send what you don't need: leave `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` off, and keep titles to the kind of item, with no names or amounts.
+
 ## Sessions that started before Agent Deck
 
 Claude Code keeps a small file per running session in `~/.claude/sessions/`, with its folder, its title and whether it's busy, idle or waiting for you. The daemon reads these every 2 seconds:
@@ -203,6 +258,10 @@ agent-deck start | stop | restart        # the daemon
 | `theme` | `system` | `system`, `dark` or `light` |
 | `notifications` | true | desktop notifications (also in the tray menu) |
 | `notifyAfterSeconds` | 30 | "Done, your turn" only after this much work |
+| `otlpPort` | 4318 | OpenTelemetry receiver on localhost (0 = off) |
+| `otlpHeartbeatSeconds` | 60 | an OTLP agent's heartbeat must advance within 3× this |
+| `otlpWaitingTtlHours` | 168 | waiting items an OTLP agent never resolves disappear after this |
+| `otlpIgnoreServices` | `["claude-code"]` | `service.name` values not shown |
 | `contextWarnPercent` | 80 | context meter turns amber from here |
 | `contextWindows` | `{}` | context window per model-id prefix, if the built-in guess is wrong |
 

@@ -16,7 +16,12 @@ import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
 import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
-import { newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs } from './agents.mjs';
+import {
+  newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs,
+  otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick,
+} from './agents.mjs';
+import { decodeOtlp } from './otlp.mjs';
+import zlib from 'node:zlib';
 
 const VERSION = '0.1.0';
 const cfg = loadConfig();
@@ -445,6 +450,77 @@ async function refreshSchedules() {
 }
 setInterval(() => refreshSchedules().catch(() => {}), 60000).unref();
 
+// ---------- OpenTelemetry receiver (OTLP/HTTP) ----------
+// Any agent exporting OTLP to localhost:4318 shows up as an agent card (one per service.name).
+// Loopback only, whatever "share" sets; protobuf or JSON, optionally gzip. Metadata only:
+// see agents.mjs for which attributes are read.
+const OTLP_SIGNALS = { '/v1/traces': 'traces', '/v1/metrics': 'metrics', '/v1/logs': 'logs' };
+const OTLP_MAX_BODY = 8 * 1024 * 1024;
+const OTLP_MAX_INFLATED = 16 * 1024 * 1024;
+
+function ingestOtlp(signal, groups) {
+  const now = Date.now();
+  const ignore = new Set(Array.isArray(cfg.otlpIgnoreServices) ? cfg.otlpIgnoreServices : []);
+  for (const g of groups) {
+    const service = otlpServiceName(g.resource);
+    if (ignore.has(service) || !g.items.length) continue;
+    const key = `${NAME}:otlp:${service}`;
+    let a = agents.get(key);
+    if (!a) {
+      if (agents.size >= MAX_AGENTS) continue;
+      a = newOtlpAgent(key, service, NAME, g.resource);
+      agents.set(key, a);
+      log(`OTLP: service "${service}" reporting`);
+    }
+    if (signal === 'traces') applyOtlpSpans(a, g.items, now);
+    else if (signal === 'metrics') applyOtlpMetrics(a, g.items, g.resource, now, Number(cfg.otlpHeartbeatSeconds) || 60);
+    else applyOtlpLogs(a, g.items, now);
+    a.lastStatus = agentStatus(a, now);
+  }
+  broadcast();
+}
+
+function handleOtlp(req, res) {
+  const reply = (code, body = '', type = 'text/plain') => { if (!res.headersSent) { res.writeHead(code, { 'content-type': type }); res.end(body); } };
+  if (!isLoopback(req.socket.remoteAddress)) return reply(403);
+  const signal = OTLP_SIGNALS[(req.url || '').split('?')[0]];
+  if (!signal) return reply(404);
+  if (req.method !== 'POST') return reply(405);
+  if (req.headers.origin !== undefined) { log(`OTLP: refused ${req.url} from a web page`); return reply(403); }
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  const json = type === 'application/json';
+  if (!json && type !== 'application/x-protobuf') return reply(415);
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => { size += c.length; if (size > OTLP_MAX_BODY) { reply(413); req.destroy(); } else chunks.push(c); });
+  req.on('end', () => {
+    if (size > OTLP_MAX_BODY) return;
+    let body = Buffer.concat(chunks);
+    try {
+      if (/gzip/i.test(String(req.headers['content-encoding'] || ''))) body = zlib.gunzipSync(body, { maxOutputLength: OTLP_MAX_INFLATED });
+      ingestOtlp(signal, decodeOtlp(signal, body, json));
+    } catch (e) {
+      log(`OTLP: bad ${signal} request: ${String(e.message).slice(0, 120)}`);
+      return reply(400, json ? '{"error":"bad request"}' : '', json ? 'application/json' : 'text/plain');
+    }
+    // An empty Export*ServiceResponse.
+    if (json) reply(200, '{}', 'application/json'); else reply(200, '', 'application/x-protobuf');
+  });
+  req.on('error', () => {});
+}
+
+function startOtlp() {
+  const port = cfg.otlpPort === undefined ? 4318 : Number(cfg.otlpPort);
+  if (!port) return;
+  // Both loopback addresses: exporters default to http://localhost:4318, which may resolve to ::1.
+  for (const host of ['127.0.0.1', '::1']) {
+    const srv = http.createServer(handleOtlp);
+    srv.headersTimeout = 15000;
+    srv.on('error', (e) => log(`OTLP receiver not listening on [${host}]:${port}: ${e.code || e.message}`)); // never exits the daemon
+    srv.listen(port, host, () => log(`OTLP receiver on [${host}]:${port}`));
+  }
+}
+
 // ---------- widget commands ----------
 function handleWidgetMessage(ws, msg) {
   switch (msg.type) {
@@ -525,8 +601,12 @@ setInterval(() => {
   // Agents whose heartbeat stopped turn "not responding" with no event to tell us: check here.
   for (const a of [...agents.values()]) {
     if (now - (a.lastSeen || 0) > AGENT_FORGET_MS) { agents.delete(a.key); changed = true; continue; }
-    const maxJobMs = Number(process.env.AGENT_DECK_JOB_MAX_MS) || (Number(cfg.agentJobMaxHours) || 12) * 3600 * 1000;
-    if (expireJobs(a, now, maxJobMs)) { log(`agent "${a.name}": a job reported no end, marked failed`); changed = true; }
+    if (a.otlp) {
+      if (otlpTick(a, now, { waitingTtlMs: (Number(cfg.otlpWaitingTtlHours) || 168) * 3600 * 1000 })) changed = true;
+    } else {
+      const maxJobMs = Number(process.env.AGENT_DECK_JOB_MAX_MS) || (Number(cfg.agentJobMaxHours) || 12) * 3600 * 1000;
+      if (expireJobs(a, now, maxJobMs)) { log(`agent "${a.name}": a job reported no end, marked failed`); changed = true; }
+    }
     const st = agentStatus(a, now);
     if (st !== a.lastStatus) { if (a.lastStatus) log(`agent "${a.name}" is now ${st}`); a.lastStatus = st; changed = true; }
   }
@@ -649,6 +729,7 @@ fs.watchFile(CONFIG_PATH, { interval: 2000 }, () => {
 }).unref();
 
 loadState();
+startOtlp();
 let listening = 0;
 servers.forEach((srv, i) => {
   srv.on('upgrade', handleUpgrade);

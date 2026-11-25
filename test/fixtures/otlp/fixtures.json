@@ -1,0 +1,17 @@
+{
+ "traces": {
+  "content_type": "application/x-protobuf",
+  "bytes": 1497,
+  "requests": 1
+ },
+ "metrics": {
+  "content_type": "application/x-protobuf",
+  "bytes": 313,
+  "requests": 1
+ },
+ "logs": {
+  "content_type": "application/x-protobuf",
+  "bytes": 526,
+  "requests": 1
+ }
+}

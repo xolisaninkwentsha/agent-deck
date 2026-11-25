@@ -116,6 +116,7 @@ export function expireJobs(a, now, maxMs) {
 
 export function agentStatus(a, now = Date.now()) {
   if (a.heartbeat && now - a.lastHeartbeat > a.heartbeat * 3000) return AGENT_STATUS.NOT_RESPONDING;
+  if (a.otlp?.crashLoop) return AGENT_STATUS.ERROR;
   if (a.lastError && a.lastError.at > Math.max(a.lastJobStart, a.lastOk)) return AGENT_STATUS.ERROR;
   if (Object.keys(a.waiting).length) return AGENT_STATUS.WAITING;
   if (Object.keys(a.jobs).length) return AGENT_STATUS.WORKING;
@@ -132,6 +133,157 @@ export function agentView(a, now = Date.now()) {
     lastError: a.lastError, schedule: next, nextJob: next[0] || null,
     heartbeat: a.heartbeat, lastHeartbeat: a.lastHeartbeat, lastSeen: a.lastSeen,
     startedAt: a.startedAt, restarts: a.restarts || 0,
+    source: a.source || 'api',
+    ...(a.otlp ? otlpView(a, now) : {}),
+  };
+}
+
+// ---------- agents that export OpenTelemetry (OTLP) ----------
+// One agent per resource service.name. Only the attribute keys below are ever read; span and
+// status messages, log bodies and message-content attributes are never looked at. GenAI semantic
+// conventions are still in development, so current names come first, then older/alternative ones.
+const OTLP_LIMITS = { running: 50, finished: 500, errors: 5, models: 20 };
+const STALE_JOB_MS = 15 * 60 * 1000;
+const WAIT_EVENT = /^(waiting|approval\.requested|human_input\.requested)$/i;
+const DONE_EVENT = /^(resolved|approval\.(resolved|granted|denied)|human_input\.received)$/i;
+const AGGREGATE_OPS = new Set(['invoke_agent', 'create_agent', 'execute_tool']);
+const firstOf = (attrs, ...keys) => {
+  for (const k of keys) { const v = attrs?.[k]; if (v !== undefined && v !== null && v !== '') return v; }
+  return undefined;
+};
+const num = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : 0);
+
+export function otlpServiceName(resource) {
+  return text(resource?.['service.name'], 60) || 'unknown_service';
+}
+export function newOtlpAgent(key, service, host, resource) {
+  const a = newAgent(key, service, host);
+  a.source = 'otlp';
+  a.description = resource?.['service.version'] ? `v${text(resource['service.version'], 30)}` : '';
+  a.otlp = { running: {}, finished: [], tokens: { day: '', input: 0, output: 0, models: {} }, hb: {}, restartTimes: [], errors: [], crashLoop: false };
+  return a;
+}
+
+const isJobSpan = (s) => firstOf(s.attrs, 'job.name') !== undefined || s.attrs?.['gen_ai.operation.name'] === 'invoke_agent' || /^invoke_agent\b/.test(s.name);
+const jobNameOf = (s) => text(firstOf(s.attrs, 'job.name', 'gen_ai.agent.name') || s.name.replace(/^invoke_agent\s*/, '') || 'job', 60);
+const toolOf = (s) => text(firstOf(s.attrs, 'gen_ai.tool.name') || /^execute_tool\s+(.+)$/.exec(s.name)?.[1] || (s.attrs?.['gen_ai.operation.name'] === 'execute_tool' ? s.name : ''), 60);
+
+function pushError(a, e) {
+  a.otlp.errors.unshift(e);
+  a.otlp.errors.length = Math.min(a.otlp.errors.length, OTLP_LIMITS.errors);
+}
+function addTokens(a, model, input, output, now) {
+  const t = a.otlp.tokens, day = new Date(now).toDateString();
+  if (t.day !== day) Object.assign(t, { day, input: 0, output: 0, models: {} });
+  t.input += input; t.output += output;
+  const m = text(model, 60) || 'unknown model';
+  if (t.models[m] !== undefined || Object.keys(t.models).length < OTLP_LIMITS.models) t.models[m] = (t.models[m] || 0) + input + output;
+}
+function waitingFrom(a, name, attrs, fallbackId, now) {
+  if (WAIT_EVENT.test(name)) {
+    applyAgentEvent(a, {
+      event: 'waiting', id: firstOf(attrs, 'waiting.id', 'approval.id', 'id') || fallbackId,
+      title: firstOf(attrs, 'waiting.title', 'approval.title', 'title') || 'Waiting on you', link: firstOf(attrs, 'url.full', 'link', 'url', 'waiting.link'),
+    }, now);
+  } else if (DONE_EVENT.test(name)) {
+    const id = firstOf(attrs, 'waiting.id', 'approval.id', 'id');
+    if (id !== undefined) applyAgentEvent(a, { event: 'resolved', id }, now);
+  }
+}
+function finishJob(a, s, now) {
+  const o = a.otlp, job = jobNameOf(s), failed = s.status?.code === 2;
+  const errType = failed ? text(firstOf(s.attrs, 'error.type') || s.events.find((e) => e.name === 'exception')?.attrs?.['exception.type'] || 'error', 80) : '';
+  delete o.running[s.traceId]; delete a.jobs[s.traceId];
+  if (s.traceId && !o.finished.includes(s.traceId)) { o.finished.push(s.traceId); if (o.finished.length > OTLP_LIMITS.finished) o.finished.shift(); }
+  a.recent.unshift({ job, result: failed ? 'error' : 'ok', summary: errType, at: now, durationMs: s.end && s.start ? Math.max(0, s.end - s.start) : null });
+  a.recent.length = Math.min(a.recent.length, MAX_RECENT);
+  if (failed) { a.lastError = { message: `${job} failed: ${errType}`, at: now }; pushError(a, { type: errType, job, at: now }); } else a.lastOk = now;
+}
+
+export function applyOtlpSpans(a, spans, now = Date.now()) {
+  const o = a.otlp;
+  a.lastSeen = now;
+  for (const s of spans) {
+    const op = s.attrs?.['gen_ai.operation.name'];
+    if (!AGGREGATE_OPS.has(op)) {
+      const input = num(firstOf(s.attrs, 'gen_ai.usage.input_tokens', 'gen_ai.usage.prompt_tokens', 'llm.usage.prompt_tokens'));
+      const output = num(firstOf(s.attrs, 'gen_ai.usage.output_tokens', 'gen_ai.usage.completion_tokens', 'llm.usage.completion_tokens'));
+      if (input || output) addTokens(a, firstOf(s.attrs, 'gen_ai.response.model', 'gen_ai.request.model'), input, output, now);
+    }
+    for (const ev of s.events || []) waitingFrom(a, ev.name, ev.attrs, `${s.spanId}:${ev.name}`, now);
+    const tool = toolOf(s);
+    if (!s.parentSpanId) { if (isJobSpan(s)) finishJob(a, s, now); continue; }
+    if (o.finished.includes(s.traceId)) continue; // a child that arrived after its job ended
+    let r = o.running[s.traceId];
+    if (!r && isJobSpan(s) && Object.keys(o.running).length < OTLP_LIMITS.running) {
+      r = o.running[s.traceId] = { job: jobNameOf(s), tool: '', startedAt: s.start || now, lastAt: now };
+      a.lastJobStart = now;
+    }
+    if (!r) continue;
+    r.lastAt = now;
+    if (r.job === 'job' && isJobSpan(s)) r.job = jobNameOf(s);
+    if (tool) r.tool = tool;
+    a.jobs[s.traceId] = { job: r.job, detail: '', startedAt: r.startedAt, step: r.tool ? `last tool: ${r.tool}` : '' };
+  }
+}
+
+// The heartbeat: a metric named like "*heartbeat*". For a counter or sum, only an increase counts
+// as alive (the SDK exports from its own thread, so a hung main loop still exports the same
+// value). A new start time or service.instance.id means the process restarted.
+export function applyOtlpMetrics(a, metrics, resource, now = Date.now(), heartbeatSeconds = 60) {
+  const o = a.otlp;
+  a.lastSeen = now;
+  for (const m of metrics) {
+    if (!/heartbeat/i.test(m.name) || !m.points.length) continue;
+    const p = m.points[m.points.length - 1];
+    const hb = o.hb, instance = text(resource?.['service.instance.id'], 80);
+    const restarted = Boolean((hb.start && p.start && p.start !== hb.start) || (hb.instance && instance && instance !== hb.instance));
+    if (restarted) { o.restartTimes.push(now); o.restartTimes = o.restartTimes.slice(-20); a.restarts = (a.restarts || 0) + 1; a.startedAt = now; }
+    const advanced = restarted || hb.value === undefined || m.kind === 'gauge' || p.value !== hb.value;
+    Object.assign(hb, { value: p.value, start: p.start, instance });
+    a.heartbeat = heartbeatSeconds;
+    if (advanced) a.lastHeartbeat = now;
+  }
+}
+
+export function applyOtlpLogs(a, logs, now = Date.now()) {
+  const o = a.otlp;
+  a.lastSeen = now;
+  for (const r of logs) {
+    if (r.eventName) waitingFrom(a, r.eventName, r.attrs, `${r.spanId || r.time}:${r.eventName}`, now);
+    if (r.severity < 17) continue; // ERROR and above
+    const type = text(firstOf(r.attrs, 'exception.type', 'error.type') || r.eventName || r.severityText || 'ERROR', 80);
+    const job = text(firstOf(r.attrs, 'job.name') || o.running[r.traceId]?.job || '', 60);
+    pushError(a, { type, job, at: now });
+    a.lastError = { message: job ? `${job}: ${type}` : type, at: now };
+  }
+}
+
+// Per tick: jobs that went silent, expired waiting items, crash-loop detection.
+export function otlpTick(a, now, { waitingTtlMs = 7 * 24 * 3600 * 1000 } = {}) {
+  const o = a.otlp;
+  let changed = false;
+  for (const [traceId, r] of Object.entries(o.running)) {
+    if (now - r.lastAt <= STALE_JOB_MS) continue;
+    delete o.running[traceId]; delete a.jobs[traceId];
+    o.finished.push(traceId); if (o.finished.length > OTLP_LIMITS.finished) o.finished.shift();
+    a.recent.unshift({ job: r.job, result: 'error', summary: 'no end reported', at: now, durationMs: null });
+    a.recent.length = Math.min(a.recent.length, MAX_RECENT);
+    changed = true;
+  }
+  for (const [id, w] of Object.entries(a.waiting)) if (now - w.at > waitingTtlMs) { delete a.waiting[id]; changed = true; }
+  const recentRestarts = o.restartTimes.filter((t) => now - t < 10 * 60 * 1000).length;
+  const loop = recentRestarts >= 3;
+  if (loop && !o.crashLoop) a.lastError = { message: `Restarting repeatedly (${recentRestarts} restarts in 10 min)`, at: now };
+  if (loop !== o.crashLoop) { o.crashLoop = loop; changed = true; }
+  return changed;
+}
+
+function otlpView(a, now) {
+  const t = a.otlp.tokens, today = t.day === new Date(now).toDateString();
+  return {
+    tokensToday: today ? { input: t.input, output: t.output, total: t.input + t.output, models: Object.entries(t.models).sort((x, y) => y[1] - x[1]) } : { input: 0, output: 0, total: 0, models: [] },
+    errors: a.otlp.errors, crashLoop: a.otlp.crashLoop,
   };
 }
 

@@ -24,6 +24,15 @@ export const DEFAULTS = {
   holdSeconds: 300,
   // Name shown on this machine's cards. Defaults to the hostname.
   name: null,
+  // OpenTelemetry receiver (OTLP/HTTP) for agents that export telemetry; always 127.0.0.1/::1 only.
+  // 4318 is the exporters' default endpoint. 0 turns it off.
+  otlpPort: 4318,
+  // An agent's heartbeat metric must advance within 3x this many seconds, or it's "not responding".
+  otlpHeartbeatSeconds: 60,
+  // Items waiting on you that an agent never resolves disappear after this long.
+  otlpWaitingTtlHours: 168,
+  // service.name values to ignore (Claude Code's own telemetry would duplicate the session cards).
+  otlpIgnoreServices: ['claude-code'],
   // Context meter on each card: warn (amber) from this percentage of the window.
   contextWarnPercent: 80,
   // Context window per model-id prefix, if the built-in guess is wrong, e.g. {"claude-opus-5-5": 1000000}.
