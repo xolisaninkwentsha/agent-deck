@@ -82,7 +82,7 @@ async function createWindow() {
   win.webContents.once('did-finish-load', () => setTimeout(() => reveal('loaded'), 300));
   setTimeout(() => reveal('timer'), 2500);
   win.webContents.on('render-process-gone', (_e, d) => console.log('[agent-deck] renderer gone: ' + JSON.stringify(d)));
-  win.webContents.on('console-message', (_e, level, message) => { if (level >= 2) console.log('[agent-deck] page: ' + message); });
+  win.webContents.on('console-message', (e) => { if (e.level === 'warning' || e.level === 'error') console.log('[agent-deck] page: ' + e.message); });
 
   // Development aid: AGENT_DECK_SCREENSHOT=/path.png saves an image of the panel and quits.
   if (process.env.AGENT_DECK_SCREENSHOT) {
