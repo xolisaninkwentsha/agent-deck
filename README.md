@@ -235,6 +235,24 @@ The panel sends a desktop notification when:
 
 At most one notification per session every 10 seconds. **Clicking** one shows the panel and jumps to the session (its tmux pane or VS Code window). Turn them off with **Notifications** in the tray menu (`notifications` in the config).
 
+## Bolt, and the line under each session
+
+Each card has **Bolt**, a small robot whose state follows the session's:
+- **Idle:** asleep, with a dark screen.
+- **Working:** eyes scanning and his gear turning.
+- **Needs you:** a "?" on his screen, a flashing antenna, and a wave.
+- **Error:** ✕ eyes and smoke.
+
+Each session gets its own head tint, so cards are easy to tell apart. The panel uses the **Blueprint** look: navy drafting paper in dark mode, and a light "whiteprint" under the Light theme.
+
+Under each session, a line shows:
+- **Model:** e.g. Opus 5.5. Taken from the transcript, so it follows a `/model` switch.
+- **Context meter:** see below.
+- **Tokens this session:** e.g. `186M in · 676k out`. "In" counts input, cache writes and cache reads, so it grows fast. Hover for the exact numbers.
+- **Top three tools:** with how many times each was called.
+
+Tokens and tools come from reading the session's transcript as it grows. Each API message and each tool call counts once. Subagents' own work isn't included, though the calls that started them are. Watch-only sessions get the same line, because it doesn't depend on hooks.
+
 ## Context meter
 
 Each card shows how full the session's context window is (`ctx 59%`; hover for the token count and model). It turns amber from `contextWarnPercent` (80% by default) and red from 95%.

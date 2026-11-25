@@ -87,6 +87,59 @@ export function contextUsage(tail) {
   return null;
 }
 
+// Running totals for a session, read from its transcript a piece at a time (each call picks up
+// where the last one stopped, at most 8 MB, so a long transcript is caught up over a few ticks):
+// tokens in (input, cache writes and reads) and out, the latest model, and calls per tool.
+// Main thread only. One API response can span several lines with the same message id (one per
+// content block), so a message adds only what it hasn't added yet, and a tool call counts once.
+export const newUsage = () => ({ offset: 0, input: 0, output: 0, model: '', tools: {}, msgs: new Map(), toolIds: new Set() });
+export function scanUsage(file, acc = newUsage()) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch { return acc; }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size < acc.offset) acc = newUsage(); // the file was replaced: start again
+    const len = Math.min(size - acc.offset, 8 * 1024 * 1024);
+    if (len <= 0) return acc;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, acc.offset);
+    const end = buf.lastIndexOf(10); // only whole lines; the rest waits for the next call
+    if (end < 0) return acc;
+    acc.offset += end + 1;
+    for (const line of buf.subarray(0, end).toString('utf8').split('\n')) {
+      if (!line.includes('"assistant"')) continue;
+      let e;
+      try { e = JSON.parse(line); } catch { continue; }
+      const msg = e.type === 'assistant' && !e.isSidechain ? e.message : null;
+      if (!msg) continue;
+      if (msg.model && msg.model !== '<synthetic>') acc.model = String(msg.model);
+      for (const c of Array.isArray(msg.content) ? msg.content : []) {
+        if (c?.type !== 'tool_use' || !c.id || acc.toolIds.has(c.id)) continue;
+        acc.toolIds.add(c.id);
+        const name = String(c.name || 'tool').slice(0, 60);
+        acc.tools[name] = (acc.tools[name] || 0) + 1;
+      }
+      const u = msg.usage, id = msg.id || e.uuid;
+      if (u && id) {
+        const prev = acc.msgs.get(id) || { in: 0, out: 0 };
+        const inNow = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0), outNow = u.output_tokens || 0;
+        acc.input += Math.max(0, inNow - prev.in);
+        acc.output += Math.max(0, outNow - prev.out);
+        acc.msgs.set(id, { in: Math.max(inNow, prev.in), out: Math.max(outNow, prev.out) });
+      }
+    }
+    // Repeats of a message or tool call sit close together: keep only the recent ids.
+    if (acc.msgs.size > 300) acc.msgs = new Map([...acc.msgs].slice(-150));
+    if (acc.toolIds.size > 3000) acc.toolIds = new Set([...acc.toolIds].slice(-1500));
+  } finally { fs.closeSync(fd); }
+  return acc;
+}
+// What the panel shows: model, tokens, and the most-used tools.
+export const usageSummary = (acc) => ({
+  model: acc.model, tokensIn: acc.input, tokensOut: acc.output,
+  tools: Object.entries(acc.tools).sort((a, b) => b[1] - a[1]).slice(0, 6),
+});
+
 // Context window by model. Transcripts don't say which window a session has, so infer it.
 // 1M models per the Claude API model table (Nov 2026): Fable, Mythos, Opus 5.x / 4.6-4.8,
 // Sonnet 5.x / 4.6, Haiku 5.x. Everything else (e.g. Haiku 4.5) defaults to 200K.

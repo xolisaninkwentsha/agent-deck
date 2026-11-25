@@ -261,6 +261,7 @@ function contextView(c, warnPercent) {
 export function publicView(s, { warnPercent = 80 } = {}) {
   return {
     context: contextView(s.context, warnPercent),
+    usage: s.usage || null, // { model, tokensIn, tokensOut, tools: [[name, calls]] } from the transcript
     // Claude Code's own session name reads better than the first prompt (which can be a paste).
     key: s.key, id: s.id, host: s.host, cwd: s.cwd, project: s.project, title: s.name || s.title,
     watchOnly: s.source === 'discovered',
