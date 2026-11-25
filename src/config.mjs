@@ -19,9 +19,9 @@ export const DEFAULTS = {
   bind: '127.0.0.1',
   // Shared secret that remote widgets must present. Required when bind is not loopback.
   token: null,
-  // How long a permission request or question waits for an answer in the panel
-  // before falling back to the normal prompt in the terminal.
-  holdSeconds: 90,
+  // How long the panel can answer a permission request or question. Claude Code shows the
+  // same prompt in the terminal meanwhile; after this only the terminal can answer. Max 570.
+  holdSeconds: 300,
   // Name shown on this machine's cards. Defaults to the hostname.
   name: null,
   // Widget only: daemons to connect to. The local one is always included.

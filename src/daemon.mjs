@@ -5,6 +5,7 @@
 // - Holds permission requests and questions until a widget answers or the hold times out
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
@@ -20,7 +21,11 @@ const cfg = loadConfig();
 const NAME = machineName(cfg);
 const PORT = Number(cfg.port);
 const BIND = cfg.bind;
-const HOLD_MS = Math.max(5, Number(cfg.holdSeconds) || 90) * 1000;
+// How long the panel can answer a prompt. Claude Code shows the same prompt in the terminal
+// meanwhile, so a long hold costs nothing there. Capped below the decide hooks' 600 s timeout.
+const HOLD_MS = Math.min(570, Math.max(5, Number(cfg.holdSeconds) || 300)) * 1000;
+// A question held on PreToolUse is NOT shown in the terminal while held, so keep that short.
+const PRETOOLUSE_HOLD_MS = Math.min(HOLD_MS, 90000);
 // Which hook the panel answers a question (AskUserQuestion) on. While the PermissionRequest
 // for AskUserQuestion is pending, Claude Code already shows the question in the terminal, so
 // answering there never keeps someone at the terminal waiting. That was verified live (Claude
@@ -129,11 +134,12 @@ function questionFingerprint(key, questions) {
 
 // Hold a blocking hook until a widget decides or the hold expires.
 // Resolves with the hook's JSON output, or null to fall back to the terminal.
-function hold(s, res, { kind, hookEvent, toolName, toolInput, suggestions }) {
+function hold(s, res, { kind, hookEvent, toolName, toolInput, suggestions, agentId }) {
   return new Promise((resolve) => {
     const id = crypto.randomUUID();
     const now = Date.now();
-    const view = { id, kind, tool: toolName, createdAt: now, expiresAt: now + HOLD_MS };
+    const holdMs = hookEvent === 'PreToolUse' ? PRETOOLUSE_HOLD_MS : HOLD_MS;
+    const view = { id, kind, tool: toolName, createdAt: now, expiresAt: now + holdMs };
     if (kind === 'question') {
       view.questions = (toolInput?.questions || []).map((q) => ({
         question: q.question, header: q.header || '', multiSelect: Boolean(q.multiSelect),
@@ -147,38 +153,92 @@ function hold(s, res, { kind, hookEvent, toolName, toolInput, suggestions }) {
     s.status = kind === 'question' ? STATUS.QUESTION : STATUS.APPROVAL;
     s.statusTs = now;
 
-    const finish = (output, why) => {
+    // settled: the prompt was already answered in the terminal (see settleHeld). The event that
+    // showed it sets the status, so leave status and timestamps alone: bumping statusTs here
+    // would make setStatus ignore that event.
+    const finish = (output, why, { settled = false } = {}) => {
       if (!pendings.has(id)) return;
       const p = pendings.get(id);
       clearTimeout(p.timer);
       pendings.delete(id);
       if (s.pending && s.pending.id === id) {
         s.pending = null;
-        s.statusTs = Date.now();
-        if (output) {
-          s.status = STATUS.WORKING;
-          const denied = output.hookSpecificOutput?.decision?.behavior === 'deny';
-          s.step = kind === 'question' ? 'Got your answer, continuing' : denied ? 'You denied: ' + view.title.toLowerCase() : 'Approved: ' + view.title.toLowerCase();
-          s.stepTs = s.statusTs;
-        } else {
-          // Handed back to Claude Code: the normal prompt now shows in the terminal.
-          s.status = kind === 'question' ? STATUS.QUESTION : STATUS.APPROVAL;
-          s.step = 'Waiting for you in the terminal';
-          s.stepTs = s.statusTs;
+        if (!settled) {
+          s.statusTs = s.stepTs = Date.now();
+          if (output) {
+            s.status = STATUS.WORKING;
+            const denied = output.hookSpecificOutput?.decision?.behavior === 'deny';
+            s.step = kind === 'question' ? 'Got your answer, continuing' : denied ? 'You denied: ' + view.title.toLowerCase() : 'Approved: ' + view.title.toLowerCase();
+          } else if (why === 'hook closed') {
+            // Claude Code dropped the hook: No or Esc in the terminal (Claude stops and waits
+            // for you), or the session died (the PID check ends it).
+            s.status = STATUS.IDLE;
+            s.step = 'Interrupted in the terminal';
+          } else {
+            // Handed back to Claude Code: only the terminal prompt can answer now.
+            s.status = kind === 'question' ? STATUS.QUESTION : STATUS.APPROVAL;
+            s.step = 'Waiting for you in the terminal';
+          }
         }
       }
-      if (!output && kind === 'question') releasedQuestions.set(questionFingerprint(s.key, toolInput?.questions), Date.now());
+      if (!output && !settled && kind === 'question' && hookEvent === 'PreToolUse') releasedQuestions.set(questionFingerprint(s.key, toolInput?.questions), Date.now());
       log(`pending ${id} (${kind}) finished: ${why}`);
       broadcast();
       resolve(output);
     };
-    const timer = setTimeout(() => finish(null, 'timeout'), HOLD_MS);
-    pendings.set(id, { key: s.key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind });
+    const timer = setTimeout(() => finish(null, 'timeout'), holdMs);
+    pendings.set(id, { key: s.key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind, agentId: agentId || null });
     // If Claude Code gives up on the hook (or the session dies), drop the pending card.
     res.on('close', () => { if (pendings.has(id)) finish(null, 'hook closed'); });
     log(`holding ${kind} ${id} for ${s.key} (${toolName})`);
     broadcast();
   });
+}
+
+// ---------- prompts answered in the terminal ----------
+// Claude Code shows each prompt in the terminal too. Answering "Yes" there does not cancel
+// our held hook, so watch for the events that prove the prompt is gone and drop the card.
+const canon = (v) => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x)
+  ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x));
+function sameCall(p, input) {
+  if (p.toolName !== input.tool_name) return false;
+  if (p.toolName === 'ExitPlanMode') return true; // PostToolUse doesn't repeat the plan
+  if (p.toolName === 'AskUserQuestion') return canon(p.toolInput?.questions) === canon(input.tool_input?.questions); // it adds answers
+  return canon(p.toolInput) === canon(input.tool_input);
+}
+const SETTLING = new Set(['PostToolUse', 'PostToolUseFailure', 'Stop', 'UserPromptSubmit', 'SessionEnd']);
+function settleHeld(s, event, input) {
+  if (!SETTLING.has(event)) return;
+  const post = event === 'PostToolUse' || event === 'PostToolUseFailure';
+  for (const p of [...pendings.values()]) {
+    if (p.key !== s.key || p.agentId !== (input.agent_id || null)) continue;
+    if (post && !sameCall(p, input)) continue;
+    p.finish(null, `answered in the terminal (${event})`, { settled: true });
+  }
+}
+
+// After "No" or Esc in the terminal, Claude Code sends no hook event at all; the transcript
+// gets "[Request interrupted by user ...]". Look for that when a session is shown waiting.
+function interruptedInTranscript(s) {
+  const file = s.transcript;
+  if (!file || !path.isAbsolute(file) || !file.endsWith('.jsonl')) return false;
+  let st;
+  try { st = fs.statSync(file); } catch { return false; }
+  if (st.mtimeMs < s.statusTs || st.size === s.transcriptSeen) return false;
+  s.transcriptSeen = st.size;
+  const len = Math.min(st.size, 65536);
+  const buf = Buffer.alloc(len);
+  try {
+    const fd = fs.openSync(file, 'r');
+    try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
+  } catch { return false; }
+  for (const line of buf.toString('utf8').split('\n').reverse()) {
+    if (!line.includes('[Request interrupted by user')) continue;
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (e.type === 'user' && Date.parse(e.timestamp) >= s.statusTs - 1000) return true;
+  }
+  return false;
 }
 
 function buildOutput(p, decision) {
@@ -204,6 +264,7 @@ async function handleHook(body, res) {
   if (EVENT_LOG) fs.appendFile(EVENT_LOG, JSON.stringify(body) + '\n', () => {});
   if (!input.session_id) return null;
   const s = sessionFor(input, meta);
+  settleHeld(s, event, input); // first, so the event's own status isn't blocked by a stale card
   applyEvent(s, event, input, meta);
 
   let output = null;
@@ -216,7 +277,7 @@ async function handleHook(body, res) {
       return null;
     }
     let skip = !approversConnected();
-    if (isQuestion) {
+    if (isQuestion && event === 'PreToolUse') {
       const fp = questionFingerprint(s.key, input.tool_input?.questions);
       const released = releasedQuestions.get(fp);
       if (released && Date.now() - released < 120000) skip = true; // already handed to the terminal
@@ -226,6 +287,7 @@ async function handleHook(body, res) {
       output = await hold(s, res, {
         kind: isQuestion ? 'question' : 'approval',
         hookEvent: event, toolName: tool, toolInput: input.tool_input, suggestions: input.permission_suggestions,
+        agentId: input.agent_id,
       });
     } else if (isQuestion || event === 'PermissionRequest') {
       // Nobody can answer from a panel, so Claude Code is about to ask in the terminal.
@@ -299,12 +361,15 @@ setInterval(() => {
     if (!s.ended && !pidAlive(s.pid)) {
       s.ended = true; s.status = STATUS.ENDED; s.step = 'Session ended'; s.statusTs = now; changed = true;
     }
+    if (!s.ended && !s.pending && (s.status === STATUS.APPROVAL || s.status === STATUS.QUESTION) && interruptedInTranscript(s)) {
+      s.status = STATUS.IDLE; s.step = 'Interrupted in the terminal'; s.statusTs = s.stepTs = now; changed = true;
+    }
     if (s.ended && !s.pending && now - s.statusTs > 20000) { sessions.delete(s.key); changed = true; }
     else if (!s.ended && now - s.lastAt > 12 * 3600 * 1000 && !s.pid) { sessions.delete(s.key); changed = true; }
   }
   for (const [fp, t] of releasedQuestions) if (now - t > 300000) releasedQuestions.delete(fp);
   if (changed) broadcast();
-}, 5000).unref();
+}, 2000).unref();
 
 // ---------- server ----------
 function handleRequest(req, res) {

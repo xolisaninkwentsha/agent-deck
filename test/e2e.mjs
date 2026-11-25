@@ -18,17 +18,22 @@ let passed = 0;
 const ok = (name) => { passed++; console.log('  ✓ ' + name); };
 
 function hook(mode, input) {
-  return new Promise((resolve) => {
-    const p = spawn(process.execPath, [path.join(ROOT, 'src', 'hook.mjs'), mode], { env });
+  let child;
+  const done = new Promise((resolve) => {
+    child = spawn(process.execPath, [path.join(ROOT, 'src', 'hook.mjs'), mode], { env });
     let out = '';
-    p.stdout.on('data', (c) => { out += c; });
-    p.on('close', (code) => resolve({ code, out }));
-    p.stdin.end(JSON.stringify(input));
+    child.stdout.on('data', (c) => { out += c; });
+    child.on('close', (code) => resolve({ code, out }));
+    child.stdin.end(JSON.stringify(input));
   });
+  done.child = child; // lets a test kill a held hook the way Claude Code does
+  return done;
 }
 
 const S = 'sess-1';
-const base = (event, extra = {}) => ({ session_id: S, cwd: '/work/voice-api', transcript_path: '/tmp/t.jsonl', hook_event_name: event, ...extra });
+const TRANSCRIPT = path.join(HOME, 'transcript.jsonl');
+fs.writeFileSync(TRANSCRIPT, '');
+const base = (event, extra = {}) => ({ session_id: S, cwd: '/work/voice-api', transcript_path: TRANSCRIPT, hook_event_name: event, ...extra });
 
 async function main() {
   console.log(`daemon home ${HOME}, port ${PORT}`);
@@ -46,8 +51,8 @@ async function main() {
   await new Promise((r) => ws.on('open', r));
   ws.send(JSON.stringify({ type: 'hello', approvals: true }));
   const next = () => new Promise((r) => waiters.push(r));
-  const until = async (pred, label) => {
-    for (let i = 0; i < 40; i++) { if (snap && pred(snap)) return snap; await Promise.race([next(), sleep(100)]); }
+  const until = async (pred, label, tries = 40) => {
+    for (let i = 0; i < tries; i++) { if (snap && pred(snap)) return snap; await Promise.race([next(), sleep(100)]); }
     throw new Error('timed out waiting for: ' + label + '\n' + JSON.stringify(snap, null, 2));
   };
   const sess = () => snap.sessions.find((s) => s.id === S);
@@ -162,6 +167,58 @@ async function main() {
   assert.ok(Date.now() - t1 >= 4800, 'should wait for the hold');
   await until(() => sess()?.step === 'Waiting for you in the terminal', 'terminal fallback step');
   ok('unanswered request times out after holdSeconds and falls back to the terminal');
+
+  // 9b. "Yes" in the terminal doesn't cancel the hook; the matching PostToolUse must clear the card.
+  const callInput = { command: 'npm run build', description: 'Build' };
+  const heldYes = hook('decide', base('PermissionRequest', { tool_name: 'Bash', tool_input: callInput, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.detail === 'npm run build', 'held build approval');
+  t = Date.now();
+  await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { description: 'Build', command: 'npm run build' }, tool_response: {}, tool_use_id: 'b1' }));
+  r = await heldYes;
+  assert.equal(r.out, '');
+  assert.ok(Date.now() - t < 1500, 'the held hook should be let go at once');
+  await until(() => sess()?.pending === null && sess().status === 'working', 'card cleared and working');
+  ok('answered "Yes" in the terminal: the matching PostToolUse clears the card and shows working');
+
+  // 9c. A question answered in the terminal: PostToolUse repeats the questions and adds answers.
+  const heldQ = hook('decide', base('PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: { questions }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.kind === 'question', 'held question');
+  await hook('observe', base('PostToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions, answers: { 'Which audio format?': 'Opus' } }, tool_response: {}, tool_use_id: 'q9' }));
+  assert.equal((await heldQ).out, '');
+  await until(() => sess()?.pending === null && sess().status === 'working', 'question card cleared');
+  ok('question answered in the terminal clears the card');
+
+  // 9d. The turn ending (Stop) also clears a card whose prompt can no longer be open.
+  const heldStop = hook('decide', base('PermissionRequest', { tool_name: 'Write', tool_input: { file_path: '/work/voice-api/a.txt' }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.tool === 'Write', 'held write approval');
+  await hook('observe', base('Stop', { last_assistant_message: 'ok', background_tasks: [] }));
+  assert.equal((await heldStop).out, '');
+  await until(() => sess()?.pending === null && sess().status === 'idle', 'idle after Stop');
+  ok('Stop clears a held card');
+
+  // 9e. "No"/Esc in the terminal: Claude Code kills the hook and sends nothing else.
+  const heldNo = hook('decide', base('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'rm -rf dist' }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.detail === 'rm -rf dist', 'held rm approval');
+  heldNo.child.kill('SIGKILL');
+  await until(() => sess()?.pending === null && sess().status === 'idle' && sess().step === 'Interrupted in the terminal', 'idle after hook killed');
+  ok('hook killed by Claude Code ("No" in the terminal) shows your turn, not "needs approval"');
+
+  // 9f. A question waiting in the terminal stays a question when Claude Code's
+  //     permission_prompt notification arrives (it sends one for questions too).
+  const heldQ2 = hook('decide', base('PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: { questions }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.kind === 'question', 'held question 2');
+  ws.send(JSON.stringify({ type: 'release', pendingId: sess().pending.id }));
+  await heldQ2;
+  await hook('observe', base('Notification', { notification_type: 'permission_prompt', message: 'Claude needs your permission' }));
+  await sleep(300);
+  await until(() => sess()?.status === 'question', 'still a question');
+  ok('permission_prompt notification keeps a waiting question labelled as a question');
+
+  // 9g. "No" after the card went back to the terminal: no hook is alive and no event comes,
+  //     only the transcript shows it. The daemon must notice within its housekeeping tick.
+  fs.appendFileSync(TRANSCRIPT, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user for tool use]' }] } }) + '\n');
+  await until(() => sess()?.status === 'idle' && sess().step === 'Interrupted in the terminal', 'transcript interrupt noticed', 60);
+  ok('"No" in the terminal after the hand-off is picked up from the transcript');
 
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));

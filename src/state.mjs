@@ -94,6 +94,7 @@ export function newSession(key, input, meta, host) {
     subagents: {},
     pending: null,
     lastMessage: '',
+    transcript: input.transcript_path || null, // read by the daemon to spot answers given in the terminal
     pid: meta.pid || null,
     tmuxPane: meta.tmuxPane || null,
     termProgram: meta.termProgram || null,
@@ -126,6 +127,7 @@ export function applyEvent(s, event, input, meta) {
   if (meta.tmuxPane) s.tmuxPane = meta.tmuxPane;
   if (meta.termProgram) s.termProgram = meta.termProgram;
   if (input.cwd && !s.cwd) { s.cwd = input.cwd; s.project = base(input.cwd); }
+  if (input.transcript_path) s.transcript = input.transcript_path;
   s.dismissed = false;
 
   switch (event) {
@@ -173,7 +175,8 @@ export function applyEvent(s, event, input, meta) {
 
     case 'Notification': {
       const type = input.notification_type;
-      if (type === 'permission_prompt' && !s.pending) {
+      // Claude Code sends permission_prompt for questions too; keep a question labelled as one.
+      if (type === 'permission_prompt' && !s.pending && s.status !== STATUS.QUESTION) {
         setStatus(s, STATUS.APPROVAL, ts);
         setStep(s, short(input.message || 'Needs your permission', 80), ts);
       } else if (type === 'idle_prompt' || type === 'agent_needs_input') {

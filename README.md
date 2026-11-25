@@ -68,10 +68,10 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
 
 - **Claude Code shows its normal prompt in the terminal at the same time**, so answer wherever you are. If you answer in the panel, the terminal prompt closes and Claude carries on.
 - For questions this holds in the default, accept-edits, plan and auto permission modes (checked with Claude Code 2.1.332). In any other mode (for example bypass permissions) the panel gets the question *first*, and the terminal only shows it after you click **Terminal** or the hold runs out.
-- If nobody answers in the panel within **90 seconds** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer.
+- If you answer in the terminal instead, the card clears by itself. "No" or Esc clears it straight away. After "Yes" it clears when the tool finishes, because Claude Code reports nothing sooner, so a long-running command keeps its card until then and clicking it does nothing.
+- If nobody answers in the panel within **5 minutes** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer. (A question in a mode where the panel gets it first is held for at most 90 seconds.)
 - If no panel is open, nothing is held: Claude Code behaves exactly as before.
 - The **shield** button in the panel header turns this off. With it off, the panel only watches and every prompt goes to the terminal.
-- Known issue: if you answer in the terminal, the card can keep its buttons until the hold runs out. Clicking them then does nothing.
 
 "Always" applies the rule Claude Code suggests (for example "always allow `npm run test`"), the same as choosing "Yes, don't ask again" in the terminal.
 
@@ -103,7 +103,7 @@ agent-deck start | stop | restart        # the daemon
 | `port` | 47615 | daemon port |
 | `bind` | `127.0.0.1` | set by `share` |
 | `token` | none | set by `share`; other machines need it |
-| `holdSeconds` | 90 | how long a prompt waits in the panel before going to the terminal |
+| `holdSeconds` | 300 | how long the panel can answer a prompt (the terminal shows it meanwhile); max 570 |
 | `name` | hostname | machine label on cards |
 | `hubs` | `[]` | other machines this panel shows (managed by `add-hub`) |
 | `approvalsInWidget` | true | the shield button |
