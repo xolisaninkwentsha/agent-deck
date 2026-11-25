@@ -144,7 +144,8 @@ export function agentView(a, now = Date.now()) {
 // conventions are still in development, so current names come first, then older/alternative ones.
 const OTLP_LIMITS = { running: 50, finished: 500, errors: 5, models: 20 };
 const STALE_JOB_MS = 15 * 60 * 1000;
-const WAIT_EVENT = /^(waiting|approval\.requested|human_input\.requested)$/i;
+// approval.posted (approval.kind, chat.thread): what finance-agent and the funding agent send.
+const WAIT_EVENT = /^(waiting|approval\.(requested|posted)|human_input\.requested)$/i;
 const DONE_EVENT = /^(resolved|approval\.(resolved|granted|denied)|human_input\.received)$/i;
 const AGGREGATE_OPS = new Set(['invoke_agent', 'create_agent', 'execute_tool']);
 const firstOf = (attrs, ...keys) => {
@@ -166,6 +167,9 @@ export function newOtlpAgent(key, service, host, resource) {
 
 const isJobSpan = (s) => firstOf(s.attrs, 'job.name') !== undefined || s.attrs?.['gen_ai.operation.name'] === 'invoke_agent' || /^invoke_agent\b/.test(s.name);
 const jobNameOf = (s) => text(firstOf(s.attrs, 'job.name', 'gen_ai.agent.name') || s.name.replace(/^invoke_agent\s*/, '') || 'job', 60);
+// A model or tool call inside something: in agents that wrap all their work in job spans (finance-agent,
+// the funding agent), that's a job still running even when the call itself has no job.name.
+const isGenAiCall = (s) => /^(chat|execute_tool)$/.test(s.attrs?.['gen_ai.operation.name'] || '') || /^(chat|execute_tool)\s/.test(s.name);
 const toolOf = (s) => text(firstOf(s.attrs, 'gen_ai.tool.name') || /^execute_tool\s+(.+)$/.exec(s.name)?.[1] || (s.attrs?.['gen_ai.operation.name'] === 'execute_tool' ? s.name : ''), 60);
 
 function pushError(a, e) {
@@ -179,11 +183,15 @@ function addTokens(a, model, input, output, now) {
   const m = text(model, 60) || 'unknown model';
   if (t.models[m] !== undefined || Object.keys(t.models).length < OTLP_LIMITS.models) t.models[m] = (t.models[m] || 0) + input + output;
 }
+// A title from the kind of list, when the event has no title of its own.
+const KIND_TITLES = { drafts: 'Approve drafts to send', payrun: 'Approve the payment run', payment_run: 'Approve the payment run', policy: 'Approve a round policy' };
+const kindTitle = (kind) => (kind ? KIND_TITLES[String(kind).toLowerCase().replace(/[\s-]/g, '_')] || `Approve ${text(kind, 40).replace(/[_-]/g, ' ')}` : '');
 function waitingFrom(a, name, attrs, fallbackId, now) {
   if (WAIT_EVENT.test(name)) {
+    const link = firstOf(attrs, 'url.full', 'link', 'url', 'waiting.link', 'chat.thread');
     applyAgentEvent(a, {
-      event: 'waiting', id: firstOf(attrs, 'waiting.id', 'approval.id', 'id') || fallbackId,
-      title: firstOf(attrs, 'waiting.title', 'approval.title', 'title') || 'Waiting on you', link: firstOf(attrs, 'url.full', 'link', 'url', 'waiting.link'),
+      event: 'waiting', id: firstOf(attrs, 'waiting.id', 'approval.id', 'id', 'chat.thread') || fallbackId,
+      title: firstOf(attrs, 'waiting.title', 'approval.title', 'title') || kindTitle(firstOf(attrs, 'approval.kind', 'waiting.kind')) || 'Waiting on you', link,
     }, now);
   } else if (DONE_EVENT.test(name)) {
     const id = firstOf(attrs, 'waiting.id', 'approval.id', 'id');
@@ -215,8 +223,8 @@ export function applyOtlpSpans(a, spans, now = Date.now()) {
     if (!s.parentSpanId) { if (isJobSpan(s)) finishJob(a, s, now); continue; }
     if (o.finished.includes(s.traceId)) continue; // a child that arrived after its job ended
     let r = o.running[s.traceId];
-    if (!r && isJobSpan(s) && Object.keys(o.running).length < OTLP_LIMITS.running) {
-      r = o.running[s.traceId] = { job: jobNameOf(s), tool: '', startedAt: s.start || now, lastAt: now };
+    if (!r && (isJobSpan(s) || isGenAiCall(s)) && Object.keys(o.running).length < OTLP_LIMITS.running) {
+      r = o.running[s.traceId] = { job: isJobSpan(s) ? jobNameOf(s) : 'job', tool: '', startedAt: s.start || now, lastAt: now };
       a.lastJobStart = now;
     }
     if (!r) continue;
@@ -236,6 +244,7 @@ export function applyOtlpMetrics(a, metrics, resource, now = Date.now(), heartbe
   const o = a.otlp;
   a.lastSeen = now;
   for (const m of metrics) {
+    if (/approvals?[._]waiting/i.test(m.name) && m.points.length) { trimWaiting(a, m.points, now); continue; }
     if (!/heartbeat/i.test(m.name) || !m.points.length) continue;
     const p = m.points[m.points.length - 1];
     const delta = m.temporality === 1;
@@ -249,6 +258,17 @@ export function applyOtlpMetrics(a, metrics, resource, now = Date.now(), heartbe
     a.heartbeat = heartbeatSeconds;
     if (advanced) a.lastHeartbeat = now;
   }
+}
+
+// A count of open approvals (e.g. agent.approvals.waiting), for agents that never say which item
+// was handled: when it drops, the oldest items go. Items that arrived after the count was taken stay.
+function trimWaiting(a, points, now) {
+  const n = Math.max(0, Math.round(points.reduce((sum, p) => sum + (Number(p.value) || 0), 0)));
+  const asOf = Math.max(0, ...points.map((p) => p.time || 0)) || now;
+  const items = Object.values(a.waiting);
+  const newer = items.filter((w) => w.at > asOf).length;
+  const older = items.filter((w) => w.at <= asOf).sort((x, y) => y.at - x.at);
+  for (const w of older.slice(Math.max(0, n - newer))) delete a.waiting[w.id];
 }
 
 export function applyOtlpLogs(a, logs, now = Date.now()) {

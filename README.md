@@ -185,6 +185,10 @@ What the card reads:
 | **Not responding** | a metric named `*heartbeat*` that hasn't **gone up** for 3 minutes (`otlpHeartbeatSeconds` × 3), with a notification. Because the SDK exports from its own thread, a hung main loop keeps exporting the same value; that counts as not responding. Use a counter: a gauge counts as alive whenever it's exported. Delta export (`OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta`) works too: there, any increase since the last export is alive. |
 | **Error** | failed jobs and ERROR log records (by type only). **3+ restarts in 10 minutes** (seen as a new heartbeat start time or `service.instance.id`) shows "restarting repeatedly", which catches a crash loop that systemd keeps restarting. With delta export the start time changes on every export, so only `service.instance.id` counts: the Python SDK sets one per process; with other SDKs, set one at start-up (a fresh UUID). |
 
+- **Other names that work:**
+  - `approval.posted` with `approval.kind` and `chat.thread`: the kind becomes the title (e.g. "Approve drafts to send"), and the thread is the item's id and link.
+  - A gauge named like `*approvals.waiting*`, the number of open approvals: when it drops, the oldest items are cleared, because these events never say which item was handled.
+  - Model and tool calls inside a job span that hasn't ended yet show that job as running, even without `job.name` on them. This is how finance-agent and the funding agent report.
 - **Waiting events:** spans are exported only when they end, so put a waiting event on a short span (as above), not on the job's own span, or it only appears when the whole job finishes.
 - **GenAI names:** the GenAI conventions are still in development. Newer names are tried first and older ones are accepted; a missing attribute just means less detail.
 - **Metadata only:** the receiver never stores span or status messages, log bodies, or `gen_ai.*` message content. Still, don't send what you don't need: leave `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` off, and keep titles to the kind of item, with no names or amounts.
