@@ -21,6 +21,7 @@ const ICONS = {
   agent: '<svg viewBox="0 0 12 12"><circle cx="4" cy="4.2" r="1.8" fill="none" stroke="currentColor" stroke-width="1.1"/><circle cx="8.6" cy="5" r="1.5" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M1.2 10c.4-2 1.5-3 2.8-3s2.4 1 2.8 3M7 9.8c.3-1.4 1-2.1 1.8-2.1s1.6.7 1.9 2.1" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>',
   plug: '<svg viewBox="0 0 12 12"><path d="M4 1.5v2.5M8 1.5v2.5M3 4h6v2.2a3 3 0 0 1-6 0zM6 9.2v1.8" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>',
   dot: '<svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="2" fill="currentColor"/></svg>',
+  folder: '<svg viewBox="0 0 12 12"><path d="M1.5 3h3.2l1 1.2h4.8v5.3h-9z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>',
   jump: '<svg viewBox="0 0 16 16"><path d="M6 3h7v7M13 3 5 11M3 6v7h7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
   // A cog with teeth (the old one, a circle with rays, read as a brightness control).
   gear: '<svg viewBox="0 0 16 16"><path d="M6.9 1.5h2.2l.4 1.9 1.3.6 1.6-1.1 1.6 1.6-1.1 1.6.6 1.3 1.9.4v2.2l-1.9.4-.6 1.3 1.1 1.6-1.6 1.6-1.6-1.1-1.3.6-.4 1.9H6.9l-.4-1.9-1.3-.6-1.6 1.1-1.6-1.6 1.1-1.6-.6-1.3-1.9-.4V6.9l1.9-.4.6-1.3-1.1-1.6 1.6-1.6 1.6 1.1 1.3-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>',
@@ -585,23 +586,25 @@ function questionBox(hub, s, p) {
     h('div', { class: 'countdown', 'data-expires': p.expiresAt, text: countdownText(left) }));
 }
 
+// The expanded card: each kind of thing in its own softly tinted section.
+const sec = (kind, title, ...children) => h('div', { class: `d-sec k-${kind}` }, title ? h('div', { class: 'd-head', text: title }) : null, ...children);
 function details(s) {
-  const rows = [];
-  if (s.lastMessage) rows.push(h('div', { class: 'last-msg', text: s.lastMessage }));
+  const parts = [];
+  if (s.lastMessage) parts.push(sec('msg', 'Last message', h('div', { class: 'last-msg', text: s.lastMessage })));
   if (s.background.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Background' }));
-    for (const b of s.background) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-type', text: b.type }), h('span', { class: 'd-text', text: b.command || b.description || b.id }), h('span', { class: 'd-st', text: b.status })));
+    parts.push(sec('bg', `Background · ${s.background.length}`, s.background.map((b) => h('div', { class: 'd-row' },
+      h('span', { class: 'd-type', text: b.type }), h('span', { class: 'd-text', title: b.command || b.description || b.id, text: b.command || b.description || b.id }), h('span', { class: 'd-st', text: b.status })))));
   }
   if (s.subagents.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Subagents' }));
-    for (const a of s.subagents) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-type', text: 'agent' }), h('span', { class: 'd-text', text: a.type }), h('span', { class: 'd-st', text: ago(a.startedAt) })));
+    parts.push(sec('sub', `Subagents · ${s.subagents.length}`, s.subagents.map((a) => h('div', { class: 'd-row' },
+      h('span', { class: 'd-type', text: 'agent' }), h('span', { class: 'd-text', text: a.type }), h('span', { class: 'd-st', text: ago(a.startedAt) })))));
   }
   if (s.steps.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Steps' }));
-    for (const st of s.steps.slice(-8).reverse()) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: st.text }), h('span', { class: 'd-st', text: ago(st.ts) })));
+    parts.push(sec('steps', 'Steps', h('div', { class: 'timeline' }, s.steps.slice(-8).reverse().map((st, i) => h('div', { class: 'd-row t-step' + (i === 0 ? ' now' : '') },
+      h('span', { class: 't-dot' }), h('span', { class: 'd-text', title: st.text, text: st.text }), h('span', { class: 'd-st', text: ago(st.ts) }))))));
   }
-  rows.push(h('div', { class: 'd-cwd', text: s.cwd }));
-  return h('div', { class: 'details' }, rows);
+  parts.push(h('div', { class: 'd-cwd', title: s.cwd }, h('span', { class: 'ti', html: ICONS.folder }), s.cwd));
+  return h('div', { class: 'details' }, parts);
 }
 
 // Claude Code's permission mode, when it isn't the default (Shift+Tab in the session changes it).
@@ -669,47 +672,40 @@ function agentLine(a) {
   return a.step || a.description || 'Idle';
 }
 function agentDetails(a) {
-  const rows = [];
+  const parts = [];
   const openLink = (link) => (e) => { e.preventDefault(); e.stopPropagation(); window.deck.openLink(link); };
-  if (a.description) rows.push(h('div', { class: 'last-msg', text: a.description }));
+  if (a.description) parts.push(sec('msg', null, h('div', { class: 'last-msg', text: a.description })));
   if (a.waiting.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Waiting on you (answer in Chat)' }));
-    for (const w of a.waiting) {
-      rows.push(h('div', { class: 'd-row' },
-        w.link ? h('a', { class: 'd-text link', href: '#', title: w.link, text: w.title, onclick: openLink(w.link) }) : h('span', { class: 'd-text', text: w.title }),
-        h('span', { class: 'd-st', text: ago(w.at) })));
-    }
+    parts.push(sec('wait', 'Waiting on you (answer in Chat)', a.waiting.map((w) => h('div', { class: 'd-row' },
+      w.link ? h('a', { class: 'd-text link', href: '#', title: w.link, text: w.title, onclick: openLink(w.link) }) : h('span', { class: 'd-text', text: w.title }),
+      h('span', { class: 'd-st', text: ago(w.at) })))));
   }
   if (a.recent.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Recent jobs' }));
-    for (const j of a.recent.slice(0, 6)) {
-      rows.push(h('div', { class: 'd-row' },
-        h('span', { class: 'd-type' + (j.result === 'ok' ? '' : ' bad'), text: j.result === 'ok' ? '✓' : '✗' }),
-        h('span', { class: 'd-text', title: j.summary, text: j.job + (j.summary ? ` · ${j.summary}` : '') }),
-        h('span', { class: 'd-st', text: ago(j.at) + (j.durationMs != null ? ` · ${span(j.durationMs)}` : '') })));
-    }
+    parts.push(sec('jobs', 'Recent jobs', a.recent.slice(0, 6).map((j) => h('div', { class: 'd-row' },
+      h('span', { class: 'd-type' + (j.result === 'ok' ? '' : ' bad'), text: j.result === 'ok' ? '✓' : '✗' }),
+      h('span', { class: 'd-text', title: j.summary, text: j.job + (j.summary ? ` · ${j.summary}` : '') }),
+      h('span', { class: 'd-st', text: ago(j.at) + (j.durationMs != null ? ` · ${span(j.durationMs)}` : '') })))));
   }
   if (a.tokensToday && a.tokensToday.total) {
     const t = a.tokensToday;
-    rows.push(h('div', { class: 'd-head', text: 'Tokens today' }));
-    rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: `${t.total.toLocaleString()} (in ${t.input.toLocaleString()} · out ${t.output.toLocaleString()})` })));
-    for (const [model, n] of t.models.slice(0, 4)) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: model }), h('span', { class: 'd-st', text: n.toLocaleString() })));
+    parts.push(sec('tok', 'Tokens today',
+      h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: `${t.total.toLocaleString()} (in ${t.input.toLocaleString()} · out ${t.output.toLocaleString()})` })),
+      t.models.slice(0, 4).map(([model, n]) => h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: model }), h('span', { class: 'd-st', text: n.toLocaleString() })))));
   }
   if (a.errors && a.errors.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Last errors' }));
-    for (const e of a.errors) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: e.type + (e.job ? ` · ${e.job}` : '') }), h('span', { class: 'd-st', text: ago(e.at) })));
-    if (a.crashLoop && a.lastError) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: a.lastError.message })));
+    parts.push(sec('err', 'Last errors',
+      a.errors.map((e) => h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: e.type + (e.job ? ` · ${e.job}` : '') }), h('span', { class: 'd-st', text: ago(e.at) }))),
+      a.crashLoop && a.lastError ? h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', text: a.lastError.message })) : null));
   } else if (a.lastError) {
-    rows.push(h('div', { class: 'd-head', text: 'Last error' }));
-    rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text bad', title: a.lastError.message, text: a.lastError.message }), h('span', { class: 'd-st', text: ago(a.lastError.at) })));
+    parts.push(sec('err', 'Last error', h('div', { class: 'd-row' },
+      h('span', { class: 'd-text bad', title: a.lastError.message, text: a.lastError.message }), h('span', { class: 'd-st', text: ago(a.lastError.at) }))));
   }
   if (a.schedule.length) {
-    rows.push(h('div', { class: 'd-head', text: 'Schedule' }));
-    for (const s of a.schedule.slice(0, 6)) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: s.job }), h('span', { class: 'd-st', text: when(s.nextRun) })));
+    parts.push(sec('sched', 'Schedule', a.schedule.slice(0, 6).map((x) => h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: x.job }), h('span', { class: 'd-st', text: when(x.nextRun) })))));
   }
   const restarts = a.restarts ? ` · restarted ${a.restarts}× (last ${ago(a.startedAt)} ago)` : '';
-  rows.push(h('div', { class: 'd-cwd', text: (a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago`) + restarts }));
-  return h('div', { class: 'details' }, rows);
+  parts.push(h('div', { class: 'd-cwd' }, (a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago`) + restarts));
+  return h('div', { class: 'details' }, parts);
 }
 function agentCard({ hub, a }) {
   const open = state.expanded.has(a.key);
@@ -811,7 +807,13 @@ function naturalHeight() {
   let height = 2; // body border
   for (const el of document.body.children) {
     if (el.tagName === 'SCRIPT') continue;
-    height += el === list ? (list.hidden ? 0 : list.scrollHeight) : el.getBoundingClientRect().height;
+    if (el !== list) { height += el.getBoundingClientRect().height; continue; }
+    if (list.hidden) continue;
+    // Add up the list's contents. Not its scrollHeight: that is never less than the list's own
+    // box, which fills the window, so the panel could grow but never shrink back.
+    const cs = getComputedStyle(list), kids = [...list.children];
+    height += parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+      + kids.reduce((n, k) => n + k.getBoundingClientRect().height, 0) + Math.max(0, kids.length - 1) * (parseFloat(cs.rowGap) || 0);
   }
   return Math.ceil(height);
 }
