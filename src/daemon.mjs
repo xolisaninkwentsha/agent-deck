@@ -409,12 +409,17 @@ async function handleHook(body, res) {
 }
 
 // ---------- service agents (POST /agent) ----------
+const MAX_AGENTS = 100;
+const AGENT_FORGET_MS = 30 * 24 * 3600 * 1000; // not heard from in 30 days: drop it
 function handleAgent(body) {
   const name = String(body?.agent || '');
   if (!AGENT_NAME.test(name)) return { ok: false, error: 'agent name must be letters, digits, dot, dash or underscore' };
   const key = `${NAME}:${name}`;
   let a = agents.get(key);
-  if (!a) { a = newAgent(key, name, NAME); agents.set(key, a); log(`agent "${name}" reporting`); }
+  if (!a) {
+    if (agents.size >= MAX_AGENTS) return { ok: false, error: 'too many agents' };
+    a = newAgent(key, name, NAME); agents.set(key, a); log(`agent "${name}" reporting`);
+  }
   if (!applyAgentEvent(a, body)) return { ok: false, error: `unknown event "${body.event}"` };
   if (body.event === 'start') refreshSchedules().catch(() => {});
   a.lastStatus = agentStatus(a);
@@ -518,7 +523,8 @@ setInterval(() => {
   }
   for (const [fp, t] of releasedQuestions) if (now - t > 300000) releasedQuestions.delete(fp);
   // Agents whose heartbeat stopped turn "not responding" with no event to tell us: check here.
-  for (const a of agents.values()) {
+  for (const a of [...agents.values()]) {
+    if (now - (a.lastSeen || 0) > AGENT_FORGET_MS) { agents.delete(a.key); changed = true; continue; }
     const st = agentStatus(a, now);
     if (st !== a.lastStatus) { if (a.lastStatus) log(`agent "${a.name}" is now ${st}`); a.lastStatus = st; changed = true; }
   }
@@ -526,6 +532,18 @@ setInterval(() => {
 }, 2000).unref();
 
 // ---------- server ----------
+// A web page in a browser on this machine can reach 127.0.0.1 too. Our own clients (hook.mjs,
+// the Python client, the panel) never send a web Origin, so refuse anything that does:
+// POSTs with any Origin or a non-JSON body (which would skip the CORS preflight), and
+// WebSockets from any origin but the panel's own file:// page.
+function refusedPost(req, res) {
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (req.headers.origin !== undefined) { log(`refused ${req.url} from a web page (Origin ${String(req.headers.origin).slice(0, 80)})`); res.writeHead(403).end(); return true; }
+  if (type !== 'application/json') { log(`refused ${req.url}: content-type "${type}"`); res.writeHead(415).end(); return true; }
+  return false;
+}
+const PANEL_ORIGINS = new Set(['file://', 'null']);
+
 function handleRequest(req, res) {
   const remote = req.socket.remoteAddress;
   if (req.method === 'GET' && req.url === '/health') {
@@ -536,6 +554,7 @@ function handleRequest(req, res) {
   if (req.method === 'POST' && req.url === '/agent') {
     // Service agents report from this machine only, like hooks.
     if (!isLoopback(remote)) { res.writeHead(403).end(); return; }
+    if (refusedPost(req, res)) return;
     let raw = '';
     req.setEncoding('utf8');
     req.on('data', (c) => { raw += c; if (raw.length > 65536) req.destroy(); });
@@ -549,6 +568,7 @@ function handleRequest(req, res) {
   }
   if (req.method === 'POST' && req.url === '/hook') {
     if (!isLoopback(remote)) { res.writeHead(403).end(); return; }
+    if (refusedPost(req, res)) return;
     let raw = '';
     req.setEncoding('utf8');
     req.on('data', (c) => { raw += c; if (raw.length > 5e6) req.destroy(); });
@@ -580,6 +600,13 @@ function handleUpgrade(req, socket, head) {
   const url = new URL(req.url, 'http://x');
   if (url.pathname !== '/ws') { socket.destroy(); return; }
   const remote = req.socket.remoteAddress;
+  const origin = req.headers.origin;
+  if (origin !== undefined && !PANEL_ORIGINS.has(origin)) {
+    log(`rejected a WebSocket from a web page (Origin ${String(origin).slice(0, 80)})`);
+    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+    socket.destroy();
+    return;
+  }
   if (!isLoopback(remote) && !tokensMatch(url.searchParams.get('token') || '', cfg.token || '')) {
     log(`rejected widget from ${remote}: bad token`);
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');

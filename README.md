@@ -58,6 +58,7 @@ agent-deck add-hub ubuntu ws://100.101.102.103:47615 <token>
 Run that on the Mac. The panel picks it up within a few seconds, and each card shows a small machine label.
 
 - Use **Tailscale** or your office LAN. Don't expose the port to the internet: the connection isn't encrypted by Agent Deck itself (Tailscale encrypts it).
+- Web pages in your browser can't talk to the daemon: requests that come with a browser's `Origin` header (other than the panel's own) are refused, and hooks and agents can only report from this machine.
 - To share on one interface only: `agent-deck share 100.101.102.103` (your Tailscale IP).
 - `agent-deck unshare` makes the machine local-only again.
 - Answering approvals for the remote machine works the same as local.

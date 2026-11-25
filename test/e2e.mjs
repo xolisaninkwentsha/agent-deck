@@ -455,6 +455,32 @@ async function main() {
     ok('a request from another machine to /agent or /hook is refused (403); loopback is accepted');
   }
 
+  // 9p. A web page in a browser on this machine can reach 127.0.0.1 too: refuse it.
+  const post = (url, headers, body = '{"agent":"web-page","event":"start"}') => fetch(`http://127.0.0.1:${PORT}${url}`, { method: 'POST', headers, body }).then((x) => x.status);
+  assert.equal(await post('/agent', { 'content-type': 'application/json', origin: 'https://evil.example' }), 403);
+  assert.equal(await post('/agent', { 'content-type': 'text/plain' }), 415);
+  assert.equal(await post('/hook', { 'content-type': 'application/json', origin: 'https://evil.example' }), 403);
+  assert.equal(await post('/hook', { 'content-type': 'text/plain' }), 415);
+  assert.equal(ag('web-page'), undefined);
+  const wsOpens = (origin) => new Promise((resolve) => {
+    const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, origin ? { origin } : {});
+    w.on('open', () => { w.close(); resolve(true); });
+    w.on('error', () => resolve(false));
+    w.on('unexpected-response', () => resolve(false));
+  });
+  assert.equal(await wsOpens('https://evil.example'), false, 'a web page must not get a WebSocket');
+  assert.equal(await wsOpens('file://'), true, 'the panel (file://) must');
+  assert.equal(await wsOpens(null), true, 'local tools without an Origin must');
+  ok('web pages are refused: POSTs with an Origin or a non-JSON body, WebSockets from web origins');
+
+  // 9q. At most 100 agents.
+  const names = Array.from({ length: 100 }, (_, i) => `cap-${i}`);
+  const already = snap.agents.length;
+  const results = await Promise.all(names.map((n) => agentPost({ agent: n, event: 'heartbeat' })));
+  assert.equal(results.filter((x) => x.ok).length, 100 - already);
+  assert.equal((await agentPost({ agent: 'one-too-many', event: 'heartbeat' })).error, 'too many agents');
+  ok('agents are capped at 100');
+
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));
   await hook('observe', base('SubagentStart', { agent_id: 'ag1', agent_type: 'Explore' }));
