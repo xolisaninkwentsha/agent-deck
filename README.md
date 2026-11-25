@@ -43,11 +43,13 @@ Sessions that were already open show up straight away as **watch only** (see bel
 
 ## See the Ubuntu machine from the Mac (or the other way round)
 
-On the machine you want to *watch* (e.g. Ubuntu):
+On the machine you want to *watch* (e.g. Ubuntu), in the panel's **Settings**, turn on **Share this machine**. It shares over Tailscale, on this machine's Tailscale address. Or in a terminal:
 
 ```bash
 agent-deck share            # listens on the network with a random token, prints a command to run on the other machine
 ```
+
+Either way the daemon restarts, so a prompt the panel is holding at that moment goes back to the terminal. Turning it off (or `agent-deck unshare`) makes it local-only again and keeps the token, so panels that added this machine reconnect when you share again. A daemon restarted from the panel runs on Electron's built-in Node until the next `agent-deck restart`.
 
 It prints something like:
 
@@ -57,7 +59,7 @@ agent-deck add-hub ubuntu ws://100.101.102.103:47615 <token>
 
 On the Mac, open the panel's **Settings → Other machines**, paste that whole line into any field of **Add a machine** (it fills in the name, address and token), and click **Add**. Or run the line in a terminal. The panel connects within a few seconds, and each card shows a small machine label. **Remove** in the same list disconnects it.
 
-On the shared machine, **Settings → This machine** shows the address it's shared on, and **Copy line** copies that line again (token included, so treat it like a password).
+On the shared machine, **Share this machine** shows the address it's shared on, and **Copy line** copies that line (token included, so treat it like a password). To see both machines from both panels, share each one and add each to the other.
 
 - Use **Tailscale** or your office LAN. Don't expose the port to the internet: the connection isn't encrypted by Agent Deck itself (Tailscale encrypts it).
 - Web pages in your browser can't talk to the daemon: requests that come with a browser's `Origin` header (other than the panel's own) are refused, and hooks and agents can only report from this machine.

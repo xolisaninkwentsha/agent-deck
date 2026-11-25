@@ -210,6 +210,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .set-input:focus { outline: none; border-color: var(--question); }
 .set-input::placeholder { color: var(--faint); }
 .set-error { color: var(--error); font-size: 10.5px; margin-top: 4px; }
+.switch:disabled { opacity: .5; cursor: progress; }
 .set-select {
   font: inherit; font-size: 11.5px; color: var(--text); background: var(--btn); border: 1px solid var(--line);
   border-radius: 6px; padding: 2px 4px;

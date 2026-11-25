@@ -51,8 +51,18 @@ function stopDaemon() {
   try {
     const pid = Number(fs.readFileSync(PID_PATH, 'utf8'));
     process.kill(pid, 'SIGTERM');
-    return true;
+    return pid;
   } catch { return false; }
+}
+// Stop it and wait until it has exited (up to 5 s), so a restart never finds the old one still answering.
+async function stopDaemonAndWait() {
+  const pid = stopDaemon();
+  if (!pid) return false;
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    try { process.kill(pid, 0); } catch { return true; }
+  }
+  return true;
 }
 
 // Ubuntu 23.10+ blocks unprivileged user namespaces, so Electron needs its
@@ -145,8 +155,7 @@ const commands = {
   },
 
   async restart() {
-    stopDaemon();
-    await new Promise((r) => setTimeout(r, 400));
+    await stopDaemonAndWait();
     console.log((await ensureDaemon()) ? 'Daemon restarted.' : `Couldn't start the daemon; see ${LOG_PATH}`);
   },
 
@@ -166,8 +175,7 @@ const commands = {
     const bind = bindArg || '0.0.0.0';
     const token = cfg.token || newToken();
     saveConfig({ bind, token });
-    stopDaemon();
-    await new Promise((r) => setTimeout(r, 400));
+    await stopDaemonAndWait();
     const ok = await ensureDaemon();
     const host = (bind !== '0.0.0.0' && bind) || addrs[0]?.address || '<this-machine-ip>';
     console.log(ok ? `Daemon now listening on ${bind}:${cfg.port} and requires a token from other machines.` : `Couldn't restart the daemon; see ${LOG_PATH}`);

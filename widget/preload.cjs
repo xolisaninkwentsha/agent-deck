@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('deck', {
   addHub: (name, address, token) => ipcRenderer.invoke('add-hub', { name, address, token }), // validated in main
   removeHub: (name) => ipcRenderer.send('remove-hub', name),
   copyShareLine: () => ipcRenderer.send('copy-share-line'),
+  share: (on) => ipcRenderer.invoke('share', Boolean(on)), // restarts the daemon; resolves { ok, error }
   notify: (title, body, target) => ipcRenderer.send('notify', { title, body, target }),
   onJump: (fn) => ipcRenderer.on('jump', (_e, target) => fn(target)), // a notification was clicked
   quit: () => ipcRenderer.send('quit'),

@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
+const { execFile } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 
 // Ubuntu's default Wayland session doesn't let apps keep themselves on top.
@@ -231,13 +232,12 @@ async function createWindow() {
 
 // When this machine is shared ("agent-deck share"): its address for other machines, and the line
 // to paste into their panel (it holds the token, so only main copies it; the page never sees it).
+const lanV4 = () => Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal).map((a) => a.address);
+const tailscaleV4 = () => lanV4().find((a) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a)) || null; // 100.64.0.0/10
 function shareAddress(cfg) {
   if (config.isLoopback(cfg.bind) || !cfg.token) return null;
   let host = cfg.bind;
-  if (host === '0.0.0.0' || host === '::') {
-    const v4 = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal).map((a) => a.address);
-    host = v4.find((a) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a)) || v4[0] || '<this-machine-ip>'; // Tailscale first
-  }
+  if (host === '0.0.0.0' || host === '::') host = tailscaleV4() || lanV4()[0] || '<this-machine-ip>';
   return `ws://${host.includes(':') ? `[${host}]` : host}:${cfg.port}`;
 }
 const shareLine = (cfg) => { const at = shareAddress(cfg); return at && `agent-deck add-hub ${config.machineName(cfg)} ${at} ${cfg.token}`; };
@@ -288,6 +288,21 @@ ipcMain.handle('add-hub', (_e, { name, address, token } = {}) => {
 });
 ipcMain.on('remove-hub', (_e, name) => { config.removeHub(String(name || '')); configChanged(); });
 ipcMain.on('copy-share-line', () => { const line = shareLine(config.loadConfig()); if (line) clipboard.writeText(line); });
+
+// "Share this machine": runs "agent-deck share <Tailscale IP>" / "agent-deck unshare", which restart
+// the daemon. The panel has no node of its own, so Electron runs the CLI as plain Node; the daemon it
+// starts runs that way too, until the next "agent-deck restart" from a terminal.
+ipcMain.handle('share', async (_e, on) => {
+  const ip = on ? tailscaleV4() : null;
+  if (on && !ip) return { ok: false, error: 'No Tailscale address on this machine. Install Tailscale and sign in (for an office LAN, run "agent-deck share <LAN IP>").' };
+  const cli = path.join(__dirname, '..', 'bin', 'agent-deck.mjs');
+  const failed = await new Promise((resolve) => execFile(process.execPath, [cli, ...(on ? ['share', ip] : ['unshare'])],
+    { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 20000 }, (err) => resolve(err)));
+  configChanged();
+  const shared = !config.isLoopback(config.loadConfig().bind);
+  if (failed || shared !== Boolean(on)) return { ok: false, error: `Couldn't restart Agent Deck's daemon; see ${config.LOG_PATH}` };
+  return { ok: true };
+});
 
 ipcMain.on('resize', (_e, height) => {
   if (!win || win.isDestroyed()) return;
