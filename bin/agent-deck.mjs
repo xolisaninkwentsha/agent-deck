@@ -54,6 +54,26 @@ function stopDaemon() {
   } catch { return false; }
 }
 
+// Ubuntu 23.10+ blocks unprivileged user namespaces, so Electron needs its
+// chrome-sandbox helper to be setuid root. Spot that before launching.
+function linuxSandboxProblem(electronPath) {
+  if (process.platform !== 'linux') return null;
+  let restricted = false;
+  try { restricted = fs.readFileSync('/proc/sys/kernel/apparmor_restrict_unprivileged_userns', 'utf8').trim() === '1'; } catch {}
+  if (!restricted) return null;
+  const helper = path.join(path.dirname(electronPath), 'chrome-sandbox');
+  try {
+    const st = fs.statSync(helper);
+    if (st.uid === 0 && (st.mode & 0o4755) === 0o4755) return null;
+  } catch { return null; }
+  return `Ubuntu blocks Electron's normal sandbox, so its helper must be owned by root. Run once:
+
+  sudo chown root:root '${helper}'
+  sudo chmod 4755 '${helper}'
+
+then run "agent-deck widget" again. (Repeat after reinstalling node_modules.)`;
+}
+
 function lanAddresses() {
   const out = [];
   for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
@@ -157,7 +177,22 @@ const commands = {
       console.log('Electron is not installed. Run "npm install" in ' + ROOT);
       process.exit(1);
     }
-    const child = spawn(electron, [path.join(ROOT, 'widget', 'main.cjs'), ...args], { detached: true, stdio: 'ignore' });
+    const problem = linuxSandboxProblem(electron);
+    if (problem) { console.log(problem); process.exit(1); }
+    ensureHome();
+    const logFile = path.join(HOME, 'widget.log');
+    const out = fs.openSync(logFile, 'a');
+    const child = spawn(electron, [path.join(ROOT, 'widget', 'main.cjs'), ...args], { detached: true, stdio: ['ignore', out, out] });
+    // Catch it if the panel dies straight away instead of reporting success.
+    const died = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve(false), 2500);
+      child.once('exit', (code, signal) => { clearTimeout(t); resolve({ code, signal }); });
+    });
+    if (died) {
+      const tail = fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).slice(-8).join('\n');
+      console.log(`The panel exited right away (${died.signal || 'code ' + died.code}). Last lines of ${logFile}:\n${tail}`);
+      process.exit(1);
+    }
     child.unref();
     console.log('Panel opened.');
   },
