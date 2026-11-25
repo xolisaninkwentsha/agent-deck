@@ -9,6 +9,18 @@ const { pathToFileURL } = require('node:url');
 if (process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND) {
   app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
+// In Electron 45 the switch above comes too late: the panel still connected to Wayland
+// (checked on Ubuntu 24.04 / GNOME 46), where always-on-top is ignored. Only a real
+// --ozone-platform=x11 on the command line works, and `agent-deck widget` and autostart
+// pass it. If the panel was started some other way, start it again once with the flag.
+const relaunching = process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND
+  && !process.env.AGENT_DECK_RELAUNCHED && !process.argv.some((a) => a.startsWith('--ozone-platform'));
+if (relaunching) {
+  // app.relaunch() does nothing when called before "ready", so start the new process directly.
+  const env = { ...process.env, AGENT_DECK_RELAUNCHED: '1' }; // never relaunches twice
+  require('node:child_process').spawn(process.execPath, [...process.argv.slice(1), '--ozone-platform=x11'], { detached: true, stdio: 'inherit', env }).unref();
+  app.exit(0);
+}
 // On Ubuntu 24.04+ the separate GPU process crashes inside its sandbox (Mesa can't open
 // dri_gbm.so), and then the window is never drawn, so it never appears. Running the
 // GPU work inside the main process avoids that; the renderer sandbox stays on.
@@ -29,7 +41,7 @@ const WIDTH = 360;
 let win = null;
 let config = null; // module from ../src/config.mjs
 
-if (!app.requestSingleInstanceLock()) { app.quit(); }
+if (!relaunching && !app.requestSingleInstanceLock()) { app.quit(); }
 app.on('second-instance', () => { if (win) { win.show(); win.focus(); } });
 
 function hubsFor(cfg) {
@@ -83,6 +95,9 @@ async function createWindow() {
     shown = true;
     if (process.platform === 'linux') win.show(); else win.showInactive();
     win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'floating' : 'screen-saver');
+    // GNOME (mutter) often ignores the position a new X11 window asks for and places it
+    // itself, so move it to the saved (or default) spot once it is on screen.
+    if (process.platform === 'linux') setTimeout(() => { if (!win.isDestroyed()) win.setPosition(pos.x, pos.y); }, 250);
     console.log(`[agent-deck] window shown (${why}) at ${JSON.stringify(win.getBounds())}; displays: ${JSON.stringify(screen.getAllDisplays().map((d) => ({ bounds: d.bounds, workArea: d.workArea, scale: d.scaleFactor })))}`);
   };
   win.once('ready-to-show', () => reveal('ready'));
@@ -139,5 +154,5 @@ ipcMain.on('notify', (_e, { title, body }) => {
 ipcMain.on('quit', () => app.quit());
 ipcMain.on('minimize', () => win && win.minimize());
 
-app.whenReady().then(createWindow);
+if (!relaunching) app.whenReady().then(createWindow);
 app.on('window-all-closed', () => app.quit());

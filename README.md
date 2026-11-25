@@ -81,7 +81,8 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
   `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox`
 - The panel draws without the GPU sandbox on Linux, because the GPU process crashes on recent Ubuntu and leaves the window invisible. `AGENT_DECK_GPU=1` restores Electron's defaults. If the panel ever doesn't appear, `bash test/try-display.sh` tries the alternatives.
 
-- Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this. If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `AGENT_DECK_WAYLAND=1` to try native Wayland.
+- Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this: `agent-deck widget` and autostart start Electron with `--ozone-platform=x11`, and if you start `electron widget/main.cjs` yourself without it, the panel restarts itself once with it. (Setting it from inside the app has no effect in Electron 45.) If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `AGENT_DECK_WAYLAND=1` to try native Wayland. Native Wayland can't stay on top, and its position can't be set or remembered.
+- GNOME tends to ignore where a new window asks to appear, so on Linux the panel moves itself to its remembered spot (or the top right of the main screen) right after it opens.
 - "Jump to session" switches tmux panes and focuses VS Code. For other terminals on Linux it can't raise the window yet.
 
 ## Commands

@@ -74,6 +74,10 @@ function linuxSandboxProblem(electronPath) {
 then run "agent-deck widget" again. (Repeat after reinstalling node_modules.)`;
 }
 
+// On Linux the panel must run through XWayland to stay on top under GNOME Wayland, and
+// Electron only honours that as a real command-line flag (see widget/main.cjs).
+const X11_FLAGS = process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND ? ['--ozone-platform=x11'] : [];
+
 function lanAddresses() {
   const out = [];
   for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
@@ -182,7 +186,7 @@ const commands = {
     ensureHome();
     const logFile = path.join(HOME, 'widget.log');
     const out = fs.openSync(logFile, 'a');
-    const child = spawn(electron, [path.join(ROOT, 'widget', 'main.cjs'), ...args], { detached: true, stdio: ['ignore', out, out] });
+    const child = spawn(electron, [path.join(ROOT, 'widget', 'main.cjs'), ...X11_FLAGS, ...args], { detached: true, stdio: ['ignore', out, out] });
     // Catch it if the panel dies straight away instead of reporting success.
     const died = await new Promise((resolve) => {
       const t = setTimeout(() => resolve(false), 2500);
@@ -207,7 +211,7 @@ const commands = {
       const file = path.join(os.homedir(), '.config', 'autostart', 'agent-deck.desktop');
       if (!on) { fs.rmSync(file, { force: true }); console.log('Autostart off.'); return; }
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=Agent Deck\nExec="${electron}" "${main}"\nX-GNOME-Autostart-enabled=true\n`);
+      fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=Agent Deck\nExec="${electron}" "${main}"${X11_FLAGS.map((f) => ' ' + f).join('')}\nX-GNOME-Autostart-enabled=true\n`);
       console.log(`Autostart on (${file}).`);
     } else if (process.platform === 'darwin') {
       const file = path.join(os.homedir(), 'Library', 'LaunchAgents', 'ai.botlhale.agent-deck.plist');
