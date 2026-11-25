@@ -1,7 +1,8 @@
 // Agent Deck panel: a small frameless window that stays on top of everything.
-const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const net = require('node:net');
 const { pathToFileURL } = require('node:url');
 
 // Ubuntu's default Wayland session doesn't let apps keep themselves on top.
@@ -38,11 +39,96 @@ if (process.env.AGENT_DECK_NO_GPU || (process.platform === 'linux' && !process.e
 }
 
 const WIDTH = 360;
+const LEVEL = process.platform === 'darwin' ? 'floating' : 'screen-saver';
 let win = null;
 let config = null; // module from ../src/config.mjs
+let tray = null;
+let approvals = true;     // mirrors the shield button and the tray checkbox
+let shortcutKey = null;   // accelerator registered with globalShortcut, if any
+let placed = false;       // true once our own first placement is over; later moves are the user's
 
 if (!relaunching && !app.requestSingleInstanceLock()) { app.quit(); }
-app.on('second-instance', () => { if (win) { win.show(); win.focus(); } });
+app.on('second-instance', () => showPanel());
+
+// ---------- show / hide (tray, shortcut, `agent-deck toggle`) ----------
+function showPanel() {
+  if (!win || win.isDestroyed()) return;
+  if (process.platform === 'linux') win.show(); else win.showInactive();
+  win.setAlwaysOnTop(true, LEVEL);
+  if (!placed) setTimeout(() => { placed = true; }, 1000); // ignore the window manager's first placement
+  config?.saveConfig({ panelHidden: false });
+  updateTray();
+}
+function hidePanel() {
+  if (!win || win.isDestroyed()) return;
+  win.hide();
+  config?.saveConfig({ panelHidden: true });
+  updateTray();
+}
+const togglePanel = () => (win && !win.isDestroyed() && win.isVisible() ? hidePanel() : showPanel());
+
+function setApprovals(enabled, fromTray) {
+  approvals = Boolean(enabled);
+  config.saveConfig({ approvalsInWidget: approvals });
+  if (fromTray && win && !win.isDestroyed()) win.webContents.send('approvals', approvals);
+  updateTray();
+}
+
+function createTray() {
+  try {
+    tray = new Tray(nativeImage.createFromPath(path.join(__dirname, 'icon.png')).resize({ width: 22, height: 22 }));
+    tray.setToolTip('Agent Deck');
+    tray.on('click', togglePanel); // where the desktop supports clicks; the menu works everywhere
+    updateTray();
+  } catch (e) {
+    tray = null;
+    console.log('[agent-deck] no tray icon: ' + e.message);
+  }
+}
+function updateTray() {
+  if (!tray) return;
+  const visible = Boolean(win && !win.isDestroyed() && win.isVisible());
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: visible ? 'Hide panel' : 'Show panel', click: togglePanel },
+    { label: 'Answer approvals here', type: 'checkbox', checked: approvals, click: (item) => setApprovals(item.checked, true) },
+    { type: 'separator' },
+    { label: 'Quit Agent Deck', click: () => app.quit() },
+  ]));
+}
+
+// The panel grabs its shortcut itself unless GNOME runs it (`agent-deck shortcut`): with
+// both, one key press would toggle twice. Under GNOME Wayland a grab by this XWayland
+// window only fires while another X11 window has focus, hence the GNOME binding.
+function applyShortcut(cfg) {
+  const want = cfg.shortcutVia === 'gnome' || !cfg.shortcut ? null : cfg.shortcut;
+  if (want === shortcutKey) return;
+  if (shortcutKey) globalShortcut.unregister(shortcutKey);
+  shortcutKey = null;
+  if (!want) return;
+  try {
+    if (globalShortcut.register(want, togglePanel)) shortcutKey = want;
+    else console.log(`[agent-deck] shortcut ${want} is already taken`);
+  } catch (e) { console.log(`[agent-deck] shortcut ${want}: ${e.message}`); }
+}
+
+// `agent-deck toggle|show|hide` talk to the running panel over this socket.
+function startControlSocket() {
+  const sock = path.join(config.HOME, 'panel.sock');
+  try { fs.unlinkSync(sock); } catch {}
+  const srv = net.createServer((c) => {
+    c.setEncoding('utf8');
+    c.on('error', () => {});
+    c.once('data', (d) => {
+      const cmd = String(d).trim();
+      if (cmd === 'toggle') togglePanel(); else if (cmd === 'show') showPanel(); else if (cmd === 'hide') hidePanel();
+      c.end(win && !win.isDestroyed() && win.isVisible() ? 'shown\n' : 'hidden\n');
+    });
+  });
+  srv.on('error', (e) => console.log('[agent-deck] control socket: ' + e.message));
+  srv.listen(sock, () => { try { fs.chmodSync(sock, 0o600); } catch {} });
+  app.on('will-quit', () => { srv.close(); try { fs.unlinkSync(sock); } catch {} });
+}
+app.on('will-quit', () => globalShortcut.unregisterAll());
 
 function hubsFor(cfg) {
   const local = { name: config.machineName(cfg), url: `ws://127.0.0.1:${cfg.port}/ws`, token: null, local: true };
@@ -79,24 +165,31 @@ async function createWindow() {
     icon: nativeImage.createFromPath(path.join(__dirname, 'icon.png')),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false },
   });
-  win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'floating' : 'screen-saver');
+  win.setAlwaysOnTop(true, LEVEL);
   if (process.platform === 'darwin') {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     app.dock?.hide();
   }
   win.loadFile(path.join(__dirname, 'index.html'));
+  win.on('show', updateTray);
+  win.on('hide', updateTray);
+
+  approvals = cfg.approvalsInWidget !== false;
+  createTray();
+  applyShortcut(cfg);
+  startControlSocket();
+  // Stay hidden if it was hidden when it last closed, but only with a way to bring it back.
+  const startHidden = cfg.panelHidden && Boolean(tray || shortcutKey || cfg.shortcutVia === 'gnome');
 
   // Show once the page is ready; fall back to a timer because some Linux setups never
   // fire ready-to-show for a hidden frameless window. showInactive() doesn't map the
-  // window under GNOME, so Linux uses a normal show().
+  // window under GNOME, so Linux uses a normal show() (in showPanel).
   let shown = false;
-  let placed = false; // true once our own initial positioning is over; later moves are the user's
   const reveal = (why) => {
     if (shown || win.isDestroyed()) return;
     shown = true;
-    if (process.platform === 'linux') win.show(); else win.showInactive();
-    win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'floating' : 'screen-saver');
-    setTimeout(() => { placed = true; }, 1000); // ignore the window manager's initial placement
+    if (startHidden) { console.log('[agent-deck] starting hidden (tray, shortcut or "agent-deck show" brings it back)'); return; }
+    showPanel();
     console.log(`[agent-deck] window shown (${why}) at ${JSON.stringify(win.getBounds())}; displays: ${JSON.stringify(screen.getAllDisplays().map((d) => ({ bounds: d.bounds, workArea: d.workArea, scale: d.scaleFactor })))}`);
   };
   win.once('ready-to-show', () => reveal('ready'));
@@ -126,8 +219,9 @@ async function createWindow() {
     moveTimer = setTimeout(() => { const [x, y] = win.getPosition(); config.saveConfig({ window: { x, y } }); }, 400);
   });
 
-  // Pick up hubs added with "agent-deck add-hub" without a restart.
+  // Pick up hubs added with "agent-deck add-hub" (and `agent-deck shortcut`) without a restart.
   fs.watchFile(config.CONFIG_PATH, { interval: 2000 }, () => {
+    applyShortcut(config.loadConfig());
     if (win && !win.isDestroyed()) win.webContents.send('config-changed', rendererConfig());
   });
 }
@@ -148,7 +242,7 @@ ipcMain.on('resize', (_e, height) => {
   if (cur !== h) win.setSize(WIDTH, h);
 });
 
-ipcMain.on('set-approvals', (_e, enabled) => { config.saveConfig({ approvalsInWidget: Boolean(enabled) }); });
+ipcMain.on('set-approvals', (_e, enabled) => setApprovals(enabled, false));
 
 ipcMain.on('notify', (_e, { title, body }) => {
   if (Notification.isSupported()) new Notification({ title: String(title).slice(0, 80), body: String(body).slice(0, 200), silent: false }).show();

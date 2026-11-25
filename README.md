@@ -85,6 +85,14 @@ Claude Code keeps a small file per running session in `~/.claude/sessions/`, wit
 
 The file isn't a documented Claude Code format (checked with 2.1.332). If it changes, those extras stop and the rest of Agent Deck works as before.
 
+## Show, hide, tray
+
+- **Ctrl+Alt+A** shows or hides the panel (`shortcut` in the config). The panel remembers whether it was hidden.
+- **Tray icon** (top bar on Ubuntu): show/hide the panel, turn "Answer approvals here" on or off (the same as the shield), quit.
+- **Esc** collapses the panel to its header; the ^ button opens it again.
+- `agent-deck toggle | show | hide` does the same from a terminal or script.
+- **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `agent-deck shortcut` once. It adds a GNOME custom shortcut ("Agent Deck" in Settings > Keyboard > Custom Shortcuts) that runs `agent-deck toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `agent-deck shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
+
 ## Context meter
 
 Each card shows how full the session's context window is (`ctx 59%`; hover for the token count and model). It turns amber from `contextWarnPercent` (80% by default) and red from 95%.
@@ -108,6 +116,8 @@ Each card shows how full the session's context window is (`ctx 59%`; hover for t
 ```
 agent-deck install | uninstall
 agent-deck widget | autostart [off]
+agent-deck toggle | show | hide          # the running panel
+agent-deck shortcut [off]                # GNOME: Ctrl+Alt+A everywhere
 agent-deck status
 agent-deck share [ip] | unshare
 agent-deck add-hub <name> <ws://host:port> <token> | remove-hub <name>
@@ -125,6 +135,8 @@ agent-deck start | stop | restart        # the daemon
 | `name` | hostname | machine label on cards |
 | `hubs` | `[]` | other machines this panel shows (managed by `add-hub`) |
 | `approvalsInWidget` | true | the shield button |
+| `shortcut` | `Control+Alt+A` | shows/hides the panel |
+| `shortcutVia` | none | `gnome` after `agent-deck shortcut` (the panel then doesn't grab the key) |
 | `contextWarnPercent` | 80 | context meter turns amber from here |
 | `contextWindows` | `{}` | context window per model-id prefix, if the built-in guess is wrong |
 

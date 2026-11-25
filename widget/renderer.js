@@ -111,12 +111,13 @@ function notifyNewPending(hub) {
 const decide = (hub, pendingId, decision) => send(hub, { type: 'decide', pendingId, decision });
 const release = (hub, pendingId) => send(hub, { type: 'release', pendingId });
 
-function toggleApprovals() {
-  state.approvals = !state.approvals;
-  window.deck.setApprovals(state.approvals);
+function setApprovals(enabled, tellMain) {
+  state.approvals = Boolean(enabled);
+  if (tellMain) window.deck.setApprovals(state.approvals);
   for (const hub of state.hubs) send(hub, { type: 'approvals', enabled: state.approvals });
   render();
 }
+const toggleApprovals = () => setApprovals(!state.approvals, true);
 
 // ---------- rendering ----------
 function allSessions() {
@@ -317,7 +318,16 @@ setInterval(() => {
 document.getElementById('btn-approvals').addEventListener('click', toggleApprovals);
 document.getElementById('btn-collapse').addEventListener('click', () => { state.collapsed = !state.collapsed; render(); });
 document.getElementById('btn-close').innerHTML = ICONS.close;
+document.getElementById('btn-close').title = 'Quit Agent Deck (to only hide it: Ctrl+Alt+A or the tray icon)';
 document.getElementById('btn-close').addEventListener('click', () => window.deck.quit());
+// Esc collapses the panel (leaving an answer box first if one has focus).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (document.activeElement?.classList.contains('other')) { document.activeElement.blur(); return; }
+  state.collapsed = true;
+  render();
+});
+window.deck.onApprovals((enabled) => setApprovals(enabled, false));
 
 window.deck.config().then((cfg) => {
   state.approvals = cfg.approvalsInWidget;

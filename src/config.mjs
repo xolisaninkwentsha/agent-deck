@@ -34,6 +34,12 @@ export const DEFAULTS = {
   approvalsInWidget: true,
   // Widget only: remembered window position.
   window: null,
+  // Widget only: key that shows/hides the panel (Electron accelerator syntax).
+  shortcut: 'Control+Alt+A',
+  // 'gnome' once `agent-deck shortcut` made GNOME run it; the panel then doesn't grab it itself.
+  shortcutVia: null,
+  // Widget only: hidden with the tray icon / shortcut when it last closed.
+  panelHidden: false,
 };
 
 export function ensureHome() {

@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import net from 'node:net';
+import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
@@ -77,6 +78,29 @@ then run "agent-deck widget" again. (Repeat after reinstalling node_modules.)`;
 // On Linux the panel must run through XWayland to stay on top under GNOME Wayland, and
 // Electron only honours that as a real command-line flag (see widget/main.cjs).
 const X11_FLAGS = process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND ? ['--ozone-platform=x11'] : [];
+
+// Send a word to the running panel (widget/main.cjs listens on HOME/panel.sock).
+// Resolves with the panel's answer ("shown"/"hidden"), or null if no panel is running.
+function tellPanel(word) {
+  return new Promise((resolve) => {
+    let out = '';
+    const c = net.connect(path.join(HOME, 'panel.sock'));
+    c.setEncoding('utf8');
+    c.on('connect', () => c.write(word + '\n'));
+    c.on('data', (d) => { out += d; });
+    c.on('end', () => resolve(out.trim() || 'ok'));
+    c.on('error', () => resolve(null));
+    setTimeout(() => { c.destroy(); resolve(out.trim() || null); }, 1500).unref();
+  });
+}
+
+// Electron accelerator ("Control+Alt+A") -> GNOME binding ("<Control><Alt>a").
+function gnomeBinding(accel) {
+  const MOD = { control: '<Control>', ctrl: '<Control>', commandorcontrol: '<Control>', cmdorctrl: '<Control>', alt: '<Alt>', shift: '<Shift>', super: '<Super>', meta: '<Super>' };
+  const parts = String(accel).split('+');
+  const key = parts.pop();
+  return parts.map((m) => MOD[m.toLowerCase()] || '').join('') + key.toLowerCase();
+}
 
 function lanAddresses() {
   const out = [];
@@ -201,6 +225,54 @@ const commands = {
     console.log('Panel opened.');
   },
 
+  // Show or hide the running panel (bind this to a key; see `agent-deck shortcut`).
+  async toggle() {
+    const r = await tellPanel('toggle');
+    if (r === null) return commands.widget(); // no panel running: open one
+    console.log(`Panel ${r}.`);
+  },
+  async show() {
+    const r = await tellPanel('show');
+    if (r === null) return commands.widget();
+    console.log(`Panel ${r}.`);
+  },
+  async hide() {
+    const r = await tellPanel('hide');
+    console.log(r === null ? 'No panel is running.' : `Panel ${r}.`);
+  },
+
+  // GNOME on Wayland doesn't let an app grab a key everywhere, so let GNOME run `agent-deck toggle`.
+  async shortcut() {
+    const off = args[0] === 'off';
+    if (process.platform !== 'linux') { console.log(`The panel registers ${cfg.shortcut} itself on this system.`); return; }
+    const SCHEMA = 'org.gnome.settings-daemon.plugins.media-keys';
+    const ENTRY = '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/agent-deck/';
+    const KEY = `${SCHEMA}.custom-keybinding:${ENTRY}`;
+    const gs = (...a) => execFileSync('gsettings', a, { encoding: 'utf8' }).trim();
+    let list;
+    try { list = gs('get', SCHEMA, 'custom-keybindings'); } catch {
+      console.log('Couldn\'t run gsettings. This command is for GNOME; elsewhere the panel registers the shortcut itself.');
+      process.exit(1);
+    }
+    const entries = (list.match(/'[^']*'/g) || []).map((s) => s.slice(1, -1));
+    if (off) {
+      gs('set', SCHEMA, 'custom-keybindings', `[${entries.filter((p) => p !== ENTRY).map((p) => `'${p}'`).join(', ')}]`);
+      for (const k of ['name', 'command', 'binding']) gs('reset', KEY, k);
+      saveConfig({ shortcutVia: null });
+      console.log(`Removed the GNOME shortcut. The panel grabs ${cfg.shortcut} itself again (only while an X11 window such as VS Code has focus).`);
+      return;
+    }
+    // gsettings parses values as GVariant text: pass strings as double-quoted literals.
+    const str = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    gs('set', KEY, 'name', str('Agent Deck'));
+    gs('set', KEY, 'command', str(`'${process.execPath}' '${path.join(ROOT, 'bin', 'agent-deck.mjs')}' toggle`));
+    gs('set', KEY, 'binding', str(gnomeBinding(cfg.shortcut)));
+    if (!entries.includes(ENTRY)) gs('set', SCHEMA, 'custom-keybindings', `[${[...entries, ENTRY].map((p) => `'${p}'`).join(', ')}]`);
+    saveConfig({ shortcutVia: 'gnome' });
+    console.log(`GNOME now runs "agent-deck toggle" on ${gs('get', KEY, 'binding')} (Settings > Keyboard > Custom Shortcuts > Agent Deck).`);
+    console.log('Remove it with: agent-deck shortcut off');
+  },
+
   // Start the panel when you log in.
   async autostart() {
     const on = args[0] !== 'off';
@@ -241,6 +313,8 @@ const commands = {
 
   agent-deck install          add hooks to Claude Code and start the daemon
   agent-deck widget           open the panel
+  agent-deck toggle|show|hide show or hide the running panel
+  agent-deck shortcut [off]   GNOME: run "toggle" on Ctrl+Alt+A wherever you are
   agent-deck autostart [off]  open the panel when you log in
   agent-deck status           what's installed and running
   agent-deck share [ip]       let another computer's panel see this machine
