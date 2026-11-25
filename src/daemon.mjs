@@ -21,6 +21,8 @@ const NAME = machineName(cfg);
 const PORT = Number(cfg.port);
 const BIND = cfg.bind;
 const HOLD_MS = Math.max(5, Number(cfg.holdSeconds) || 90) * 1000;
+// Development aid: AGENT_DECK_EVENT_LOG=/path.jsonl appends every raw hook payload there.
+const EVENT_LOG = process.env.AGENT_DECK_EVENT_LOG || null;
 
 ensureHome();
 const logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' });
@@ -191,6 +193,7 @@ function buildOutput(p, decision) {
 
 async function handleHook(body, res) {
   const { event, input = {}, meta = {}, mode } = body;
+  if (EVENT_LOG) fs.appendFile(EVENT_LOG, JSON.stringify(body) + '\n', () => {});
   if (!input.session_id) return null;
   const s = sessionFor(input, meta);
   applyEvent(s, event, input, meta);
