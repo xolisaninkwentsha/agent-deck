@@ -18,7 +18,7 @@ function page(state, size, plate) {
     .m, .m * { animation: none !important; transition: none !important; }
     .m .fx-z { display: none !important; }
     .wrap { width: ${size}px; height: ${size}px; display: grid; place-items: center;
-      ${plate ? `background: #163256; border-radius: ${Math.round(size * 0.22)}px;` : ''} }
+      ${plate ? `background: #3d47b8; border-radius: ${Math.round(size * 0.22)}px;` : ''} }
     .m { width: ${inner}px; height: ${inner}px; }
   </style><div class="wrap"><div class="m" data-s="${state}" style="--tint:#c9d3e2">${svg}</div></div>`;
 }

@@ -257,7 +257,7 @@ Each card has **Bolt**, a small robot whose state follows the session's:
 - **Needs you:** a "?" on his screen, a flashing antenna, and a wave.
 - **Error:** ✕ eyes and smoke.
 
-Each session gets its own head tint, so cards are easy to tell apart. The panel uses the **Blueprint** look: navy drafting paper in dark mode, and a light "whiteprint" under the Light theme.
+Each session gets its own head tint, so cards are easy to tell apart. The panel uses the **Studio** look: soft neutral greys, roomy rounded cards and an indigo accent, in dark and light (the Theme setting picks, or follows the desktop).
 
 The **tray icon** in the top bar is Bolt too, showing the most urgent state across all sessions and agents. "Needs you" comes first, then an error, then working; otherwise he's asleep. The icons are drawn from the same Bolt as the cards by `widget/icons/make-icons.cjs`.
 
