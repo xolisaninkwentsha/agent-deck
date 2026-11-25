@@ -1,12 +1,16 @@
 // Unit tests for the phone summary: what a held prompt looks like on a phone, and what is masked.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { maskSecrets, phoneSummary, LIMITS } from '../src/phone-summary.mjs';
+import { parseGnomeIdle, parseGnomeLocked, parseMacIdle, localAway } from '../src/away.mjs';
 
 let passed = 0;
 const check = (name) => { passed++; console.log(`  ✓ ${name}`); };
 const M = '••••';
 
-function main() {
+async function main() {
   assert.equal(maskSecrets('curl -H "Authorization: Bearer fake_token_abc123def456ghi789" https://api.x.com'), `curl -H "Authorization: Bearer ${M}" https://api.x.com`);
   check('masks Authorization and Bearer values');
 
@@ -120,10 +124,42 @@ function main() {
   assert.deepEqual(bash.questions, []);
   check('question summary keeps option labels only');
 
+  assert.equal(parseGnomeIdle('(uint64 123456,)\n'), 123456);
+  assert.equal(parseGnomeIdle('garbage'), null);
+  assert.equal(parseGnomeIdle(''), null);
+  assert.equal(parseGnomeLocked('(true,)\n'), true);
+  assert.equal(parseGnomeLocked('(false,)'), false);
+  assert.equal(parseGnomeLocked('garbage'), null);
+  assert.equal(parseMacIdle('    | |   "HIDIdleTime" = 5000000000\n'), 5000);
+  assert.equal(parseMacIdle('nothing here'), null);
+  check('away parsers read GNOME idle/lock and macOS HIDIdleTime; garbage gives null');
+
+  const awayDir = fs.mkdtempSync(path.join(os.tmpdir(), 'away-'));
+  const awayFile = path.join(awayDir, 'away.json');
+  const prevAway = process.env.AGENT_DECK_AWAY_FILE;
+  try {
+    process.env.AGENT_DECK_AWAY_FILE = awayFile;
+    fs.writeFileSync(awayFile, '{"idleMs":400000,"locked":false}');
+    assert.deepEqual(await localAway(), { away: true, known: true, idleMs: 400000, locked: false });
+    fs.writeFileSync(awayFile, '{"idleMs":1000,"locked":false}');
+    assert.equal((await localAway()).away, false);
+    assert.equal((await localAway({ idleAfterMs: 500 })).away, true);
+    fs.writeFileSync(awayFile, '{"idleMs":1000,"locked":true}');
+    assert.equal((await localAway()).away, true);
+    fs.writeFileSync(awayFile, 'not json');
+    assert.deepEqual(await localAway(), { away: false, known: false, idleMs: null, locked: null });
+    fs.rmSync(awayFile);
+    assert.deepEqual(await localAway(), { away: false, known: false, idleMs: null, locked: null });
+  } finally {
+    if (prevAway === undefined) delete process.env.AGENT_DECK_AWAY_FILE; else process.env.AGENT_DECK_AWAY_FILE = prevAway;
+    fs.rmSync(awayDir, { recursive: true, force: true });
+  }
+  check('localAway reads the test file: idle, locked, threshold, unparsable and missing');
+
   console.log(`\n${passed} checks passed`);
 }
 
-try { main(); } catch (e) {
+try { await main(); } catch (e) {
   console.error('\nFAILED:', e.stack || e.message);
   process.exit(1);
 }
