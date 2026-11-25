@@ -260,7 +260,7 @@ function rendererConfig() {
 }
 
 // Theme: Electron's themeSource also drives prefers-color-scheme inside the page.
-const BG = { dark: '#0d1b2e', light: '#f2f6fb' }; // Blueprint, as in style.css
+const BG = { dark: '#18181a', light: '#f4f4f2' }; // Studio, as in style.css
 function applyTheme(theme) {
   nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
   if (win && !win.isDestroyed()) win.setBackgroundColor(nativeTheme.shouldUseDarkColors ? BG.dark : BG.light);

@@ -1,50 +1,53 @@
-/* Blueprint. Dark (navy drafting paper) is the default; light ("whiteprint") comes from the Theme
-   setting (data-theme) or, for "System", the desktop's preference (Electron's themeSource drives
-   prefers-color-scheme). */
+/* Studio: soft neutral greys, roomy rounded cards, an indigo accent. Dark is the default; light
+   comes from the Theme setting (data-theme) or, for "System", the desktop's preference (Electron's
+   themeSource drives prefers-color-scheme). */
 :root {
-  --bg: #0d1b2e;
-  --grid: rgba(92, 200, 255, .055);
-  --card: #112642;
-  --card-hi: #15304f;
-  --line: #24466e;
-  --text: #e2eefc;
-  --text-soft: #c4d6ec;
-  --muted: #8ca8c9;
-  --faint: #5f7b9c;
-  --accent: #5cc8ff;
-  --accent-glow: rgba(92, 200, 255, .18);
-  --on-accent: #04121f;
-  --approval: #ffb547;
-  --question: #b8a4ff;
-  --on-question: #140c2e;
-  --chip-line: #3a5a86;
-  --error: #ff7b7b;
-  --background: #7ad7a8;
-  --idle: #7e95b2;
-  --track: #1d3a5e;
-  --well: #0a1626;
-  --well-text: #d6e4f5;
-  --btn: #15304f;
-  --btn-hi: #1b3b61;
-  --plate: #163256;
+  --bg: #18181a;
+  --card: #232326;
+  --card-hi: #29292d;
+  --card-line: #2f2f33;
+  --line: #34343a;
+  --text: #ededeb;
+  --text-soft: #d2d1cd;
+  --muted: #9d9c98;
+  --faint: #6f6e6a;
+  --accent: #8b95ff;
+  --accent-glow: rgba(139, 149, 255, .18);
+  --on-accent: #121230;
+  --approval: #f5a524;
+  --question: #56c2e6;
+  --on-question: #06202b;
+  --chip-line: #3a3a40;
+  --error: #f47c7c;
+  --background: #5dd39e;
+  --idle: #8a8984;
+  --track: #333338;
+  --well: #1b1b1e;
+  --well-text: #dcdbd7;
+  --btn: #2a2a2e;
+  --btn-hi: #323237;
+  --plate: #2a2c3d;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .25);
   --mono: ui-monospace, "SF Mono", Menlo, "Ubuntu Mono", "DejaVu Sans Mono", monospace;
 }
 :root[data-theme="light"] {
-  --bg: #f2f6fb; --grid: rgba(11, 127, 196, .07); --card: #ffffff; --card-hi: #f3f8fd; --line: #c9d9ec;
-  --text: #0f2440; --text-soft: #2c4566; --muted: #5a7394; --faint: #8ba0bb;
-  --accent: #0b7fc4; --accent-glow: rgba(11, 127, 196, .15); --on-accent: #ffffff;
-  --approval: #b9700b; --question: #6a4fd6; --on-question: #ffffff; --chip-line: #b7cbe6;
-  --error: #cc3d3d; --background: #1e8a5a; --idle: #6f85a3;
-  --track: #dbe6f3; --well: #eef4fb; --well-text: #1c3352; --btn: #eef4fb; --btn-hi: #e1ebf7; --plate: #e3eef9;
+  --bg: #f4f4f2; --card: #ffffff; --card-hi: #fafaf8; --card-line: #ecebe7; --line: #e2e1dc;
+  --text: #1d1d1b; --text-soft: #3d3c39; --muted: #6b6a66; --faint: #9b9a95;
+  --accent: #4b5ae0; --accent-glow: rgba(75, 90, 224, .14); --on-accent: #ffffff;
+  --approval: #c56f05; --question: #1b84b5; --on-question: #ffffff; --chip-line: #d9d8d3;
+  --error: #d03b3b; --background: #15803d; --idle: #8a8984;
+  --track: #e9e8e4; --well: #f6f6f4; --well-text: #2b2a27; --btn: #f4f4f2; --btn-hi: #ebebe8; --plate: #eef0fd;
+  --shadow: 0 1px 2px rgba(29, 29, 27, .05), 0 4px 14px rgba(29, 29, 27, .05);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
-    --bg: #f2f6fb; --grid: rgba(11, 127, 196, .07); --card: #ffffff; --card-hi: #f3f8fd; --line: #c9d9ec;
-    --text: #0f2440; --text-soft: #2c4566; --muted: #5a7394; --faint: #8ba0bb;
-    --accent: #0b7fc4; --accent-glow: rgba(11, 127, 196, .15); --on-accent: #ffffff;
-    --approval: #b9700b; --question: #6a4fd6; --on-question: #ffffff; --chip-line: #b7cbe6;
-    --error: #cc3d3d; --background: #1e8a5a; --idle: #6f85a3;
-    --track: #dbe6f3; --well: #eef4fb; --well-text: #1c3352; --btn: #eef4fb; --btn-hi: #e1ebf7; --plate: #e3eef9;
+    --bg: #f4f4f2; --card: #ffffff; --card-hi: #fafaf8; --card-line: #ecebe7; --line: #e2e1dc;
+    --text: #1d1d1b; --text-soft: #3d3c39; --muted: #6b6a66; --faint: #9b9a95;
+    --accent: #4b5ae0; --accent-glow: rgba(75, 90, 224, .14); --on-accent: #ffffff;
+    --approval: #c56f05; --question: #1b84b5; --on-question: #ffffff; --chip-line: #d9d8d3;
+    --error: #d03b3b; --background: #15803d; --idle: #8a8984;
+    --track: #e9e8e4; --well: #f6f6f4; --well-text: #2b2a27; --btn: #f4f4f2; --btn-hi: #ebebe8; --plate: #eef0fd;
+    --shadow: 0 1px 2px rgba(29, 29, 27, .05), 0 4px 14px rgba(29, 29, 27, .05);
   }
 }
 * { box-sizing: border-box; }
@@ -56,8 +59,6 @@ html, body {
 }
 body {
   border: 1px solid var(--line); border-radius: 12px;
-  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: 16px 16px;
 }
 /* The window grows with its content up to 85% of the screen; past that, the list scrolls. */
 html, body { height: 100%; }
@@ -71,7 +72,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   -webkit-app-region: drag;
 }
 #bar button, #bar .dots { -webkit-app-region: no-drag; }
-.brand { font-weight: 700; font-size: 11.5px; letter-spacing: 1.6px; text-transform: uppercase; }
+.brand { font-weight: 700; font-size: 13px; letter-spacing: 0; }
 .count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
@@ -91,15 +92,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .icon.small svg { width: 12px; height: 12px; }
 
 /* list */
-#list { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+#list { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 #list::-webkit-scrollbar { width: 6px; }
 #list::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .empty { color: var(--muted); padding: 14px 8px 10px; text-align: center; }
 .empty .hint { font-size: 11.5px; margin-top: 4px; opacity: .8; }
 
 .card {
-  background: var(--card); border: 1px solid var(--line); border-radius: 7px;
-  padding: 8px 8px 8px 8px; cursor: default;
+  background: var(--card); border: 1px solid var(--card-line); border-radius: 14px; box-shadow: var(--shadow);
+  padding: 10px; cursor: default;
 }
 .card:hover { background: var(--card-hi); }
 .card.attention { border-color: var(--approval); box-shadow: 0 0 0 1px color-mix(in srgb, var(--approval) 25%, transparent); }
@@ -144,7 +145,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .watch { border-style: dashed; }
 
 /* Bolt, the robot on every card: his state follows the session's (data-s on .m). */
-.avatar { width: 38px; height: 38px; flex: none; border-radius: 7px; background: var(--plate); display: grid; place-items: center; }
+.avatar { width: 38px; height: 38px; flex: none; border-radius: 12px; background: var(--plate); display: grid; place-items: center; }
 .avatar .m { width: 34px; height: 34px; }
 .card.st-ended .avatar .m, .card.agent.ag-not_responding .avatar .m { filter: grayscale(.7); }
 .m svg { width: 100%; height: 100%; display: block; overflow: visible; }
@@ -199,7 +200,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 /* model, context, tokens and the most-used tools, under each session */
 .info { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 8px 0 0 47px; padding-top: 7px; border-top: 1px solid var(--line); font: 10.5px/1.3 var(--mono); color: var(--muted); }
-.info .model { color: var(--text); background: var(--plate); border-radius: 4px; padding: 1px 6px; font-weight: 600; }
+.info .model { color: var(--text); background: var(--btn); border-radius: 6px; padding: 1px 6px; font-weight: 600; }
 .info .ctx { margin-left: 0; }
 .info .tools { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 3px 10px; }
 .info .tool { display: inline-flex; align-items: center; gap: 3px; }
@@ -229,7 +230,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .more { background: none; border: 0; padding: 2px 0; margin-top: 3px; color: var(--question); font-size: 11px; }
 .btns { display: flex; gap: 5px; margin-top: 7px; flex-wrap: wrap; }
 .btn {
-  border: 1px solid var(--line); background: var(--btn); border-radius: 7px; padding: 3px 10px; font-weight: 600;
+  border: 1px solid var(--line); background: var(--btn); border-radius: 8px; padding: 3px 11px; font-weight: 600;
 }
 .btn:hover { background: var(--btn-hi); }
 .btn.allow { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
@@ -241,7 +242,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .chip { display: inline-block; font-size: 10px; color: var(--question); border: 1px solid var(--chip-line); border-radius: 999px; padding: 0 6px; margin-bottom: 3px; }
 .q-text { font-weight: 600; color: var(--text); line-height: 1.4; user-select: text; }
 .options { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
-.opt { border: 1px solid var(--line); background: var(--btn); border-radius: 7px; padding: 3px 9px; }
+.opt { border: 1px solid var(--line); background: var(--btn); border-radius: 8px; padding: 3px 9px; }
 .opt:hover { border-color: var(--question); }
 .opt.chosen { background: var(--question); color: var(--on-question); border-color: var(--question); }
 /* options that come with a description: one per line, description visible */
@@ -296,7 +297,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 /* settings view */
 .settings { display: flex; flex-direction: column; gap: 2px; padding: 2px 4px 4px; }
-.set-row { display: flex; align-items: center; gap: 10px; padding: 7px 6px; border-radius: 8px; background: var(--card); }
+.set-row { display: flex; align-items: center; gap: 10px; padding: 8px 8px; border-radius: 12px; background: var(--card); border: 1px solid var(--card-line); }
 .set-label { flex: 1; min-width: 0; }
 .set-hint { color: var(--muted); font-size: 10.5px; margin-top: 1px; }
 .set-value { color: var(--muted); font-size: 11.5px; }
