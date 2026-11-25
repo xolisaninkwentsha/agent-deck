@@ -101,7 +101,11 @@ deck.resolved("bill-42")
 deck.error("Xero sign-in expired")
 ```
 
-- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification).
+- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification). `start(..., timer=False)` plus `deck.heartbeat()` from the agent's own main loop catches a hung loop; the default timer thread only proves the process is alive.
+- **Two kinds of process:** typically a long-running process (heartbeat, chat) and short scheduled jobs. Restarting the long-running one keeps jobs that cron started and the last error. A job that never reports its end is marked failed after `agentJobMaxHours` (12).
+- **What's waiting:** `deck.waiting_set([...])` sends the complete list of open items and replaces the panel's, so a lost `resolved` can't leave a stale item.
+- **Privacy:** keep titles and messages short, with no names, amounts or email text. They're stored in `~/.agent-deck/state.json`, shown in notifications and on any panel the machine is shared with. A failed job reports only the exception's type, never its message.
+- **Tests:** `AGENT_DECK_DISABLE=1` turns the client off, so an agent's own test suite doesn't post to your panel.
 - **Schedule:** the daemon reads your crontab and lists the lines that run in the agent's working folder (`python -m <package> <job>`), with their next run. An agent can also send its own (`deck.schedule([(job, next_run), ...])`).
 - **Under the hood:** `POST http://127.0.0.1:47615/agent` with JSON `{agent, event, ...}`; only requests from this machine are accepted. Events: `start` (name, description, heartbeat, cwd), `heartbeat`, `job_start` (job, detail), `step` (text), `job_end` (job, result ok|error, summary), `waiting` (id, title, link), `resolved` (id), `schedule` (list of {job, next_run}), `error` (message).
 - **To see it** without real agents: `node test/demo.mjs` adds two demo agents (one waiting on you, one that stops responding).

@@ -17,7 +17,8 @@ const CLAUDE = path.join(HOME, 'claude');
 fs.mkdirSync(path.join(CLAUDE, 'sessions'), { recursive: true });
 const CRONTAB = path.join(HOME, 'crontab'); // instead of the real `crontab -l`
 fs.writeFileSync(CRONTAB, '');
-const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, AGENT_DECK_CRONTAB: CRONTAB };
+const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, AGENT_DECK_CRONTAB: CRONTAB, AGENT_DECK_JOB_MAX_MS: '6000' };
+delete env.AGENT_DECK_DISABLE;
 const sleepers = []; // stand-ins for running Claude Code processes
 const fakeProcess = () => { const p = spawn('sleep', ['120']); sleepers.push(p); return p; };
 const sessionFile = (pid, fields) => fs.writeFileSync(path.join(CLAUDE, 'sessions', `${pid}.json`), JSON.stringify({ pid, ...fields }));
@@ -428,13 +429,34 @@ async function main() {
   await until(() => ag('py-agent')?.recent.length === 2, 'python agent jobs', 60);
   assert.deepEqual(ag('py-agent').recent.map((j) => [j.job, j.result]), [['broken', 'error'], ['nightly', 'ok']]);
   assert.equal(ag('py-agent').recent[1].summary, 'done');
-  assert.equal(ag('py-agent').recent[0].summary, 'ValueError: nope');
+  assert.equal(ag('py-agent').recent[0].summary, 'ValueError', 'only the exception type, never its message');
   assert.equal(ag('py-agent').waiting[0].title, 'Check the draft');
   ok('Python client: job/step/waiting/summary arrive; the job\'s own exception is re-raised');
   r = await py(pyAgent, PORT + 500); // nothing listens there
   assert.equal(r.code, 0, r.err);
   assert.ok(r.ms < 2500, `took ${r.ms} ms`);
   ok('Python client: with no daemon it neither raises nor hangs');
+  r = await py('import os; os.environ["AGENT_DECK_DISABLE"] = "1"\n' + pyAgent.replace('"py-agent"', '"py-off"'), PORT);
+  assert.equal(r.code, 0, r.err);
+  await sleep(500);
+  assert.equal(ag('py-off'), undefined);
+  ok('Python client: AGENT_DECK_DISABLE=1 sends nothing (for the agents\' own tests)');
+
+  // 9n2. Two kinds of process per agent: a restart of the long-running one must not hide a
+  //      cron job mid-run or an error; the full open list replaces drifted items; a job that
+  //      never ends expires.
+  await agentPost({ agent: 'two-proc', event: 'start', heartbeat: 0 });
+  await agentPost({ agent: 'two-proc', event: 'job_start', job: 'nightly' });
+  await agentPost({ agent: 'two-proc', event: 'error', message: 'sign-in expired' });
+  await agentPost({ agent: 'two-proc', event: 'start', heartbeat: 0 }); // chat-watch restarted
+  await until(() => ag('two-proc')?.restarts === 1, 'restart counted');
+  assert.equal(ag('two-proc').job?.job, 'nightly');
+  assert.equal(ag('two-proc').lastError?.message, 'sign-in expired');
+  for (const id of ['a', 'b', 'c']) await agentPost({ agent: 'two-proc', event: 'waiting', id, title: `item ${id}` });
+  await agentPost({ agent: 'two-proc', event: 'waiting_set', items: [{ id: 'b', title: 'item b' }, { id: 'd', title: 'item d', link: 'https://chat.google.com/x' }] });
+  await until(() => ag('two-proc')?.waiting.map((w) => w.id).join() === 'b,d' || ag('two-proc')?.waiting.map((w) => w.id).sort().join() === 'b,d', 'waiting_set replaced the list');
+  await until(() => ag('two-proc')?.jobsRunning === 0 && ag('two-proc').recent[0]?.summary === 'no end reported', 'stale job expired', 120);
+  ok('agent: a restart keeps running jobs and the error; waiting_set replaces the list; a job with no end expires');
 
   // 9o. /agent and /hook only take requests from this machine.
   const lan = Object.values(os.networkInterfaces()).flat().find((a) => a && a.family === 'IPv4' && !a.internal)?.address;

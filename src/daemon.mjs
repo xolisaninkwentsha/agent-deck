@@ -16,7 +16,7 @@ import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
 import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
-import { newAgent, applyAgentEvent, agentView, agentStatus, AGENT_NAME, nextRun, cronJobs } from './agents.mjs';
+import { newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs } from './agents.mjs';
 
 const VERSION = '0.1.0';
 const cfg = loadConfig();
@@ -525,6 +525,8 @@ setInterval(() => {
   // Agents whose heartbeat stopped turn "not responding" with no event to tell us: check here.
   for (const a of [...agents.values()]) {
     if (now - (a.lastSeen || 0) > AGENT_FORGET_MS) { agents.delete(a.key); changed = true; continue; }
+    const maxJobMs = Number(process.env.AGENT_DECK_JOB_MAX_MS) || (Number(cfg.agentJobMaxHours) || 12) * 3600 * 1000;
+    if (expireJobs(a, now, maxJobMs)) { log(`agent "${a.name}": a job reported no end, marked failed`); changed = true; }
     const st = agentStatus(a, now);
     if (st !== a.lastStatus) { if (a.lastStatus) log(`agent "${a.name}" is now ${st}`); a.lastStatus = st; changed = true; }
   }

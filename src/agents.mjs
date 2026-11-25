@@ -33,12 +33,14 @@ export function applyAgentEvent(a, ev, now = Date.now()) {
   a.lastSeen = now;
   switch (ev.event) {
     case 'start':
+      // The long-running process (re)started. Cron jobs run in other processes, so running jobs
+      // and the last error stay: a restart mustn't hide a job mid-run or a crash loop.
       a.displayName = text(ev.name, 60) || a.name;
       a.description = text(ev.description, 160);
       a.heartbeat = Math.max(0, Math.min(3600, Number(ev.heartbeat) || 0));
       a.cwd = text(ev.cwd, 300);
+      if (a.startedAt) a.restarts = (a.restarts || 0) + 1;
       a.startedAt = now; a.lastHeartbeat = now;
-      a.jobs = {}; a.lastError = null; // a fresh start: nothing is running any more
       return true;
     case 'heartbeat':
       a.lastHeartbeat = now;
@@ -73,6 +75,16 @@ export function applyAgentEvent(a, ev, now = Date.now()) {
       for (const old of ids.slice(0, Math.max(0, ids.length - MAX_WAITING))) delete a.waiting[old];
       return true;
     }
+    case 'waiting_set': {
+      // The agent's whole list of open asks: replaces ours, so a lost "resolved" can't linger.
+      const next = {};
+      for (const it of (Array.isArray(ev.items) ? ev.items : []).slice(0, MAX_WAITING)) {
+        const id = text(it?.id, 120);
+        if (id) next[id] = { id, title: text(it.title, 200) || id, link: safeLink(it.link), at: a.waiting[id]?.at || now };
+      }
+      a.waiting = next;
+      return true;
+    }
     case 'resolved':
       delete a.waiting[text(ev.id, 120)];
       return true;
@@ -87,6 +99,19 @@ export function applyAgentEvent(a, ev, now = Date.now()) {
     default:
       return false;
   }
+}
+
+// A job that never reported its end (e.g. the cron run was killed) stops counting as running.
+export function expireJobs(a, now, maxMs) {
+  let changed = false;
+  for (const j of Object.values(a.jobs)) {
+    if (now - j.startedAt <= maxMs) continue;
+    delete a.jobs[j.job];
+    a.recent.unshift({ job: j.job, result: 'error', summary: 'no end reported', at: now, durationMs: null });
+    a.recent.length = Math.min(a.recent.length, MAX_RECENT);
+    changed = true;
+  }
+  return changed;
 }
 
 export function agentStatus(a, now = Date.now()) {
@@ -106,6 +131,7 @@ export function agentView(a, now = Date.now()) {
     waiting: Object.values(a.waiting).sort((x, y) => x.at - y.at), lastJob: a.recent[0] || null, recent: a.recent,
     lastError: a.lastError, schedule: next, nextJob: next[0] || null,
     heartbeat: a.heartbeat, lastHeartbeat: a.lastHeartbeat, lastSeen: a.lastSeen,
+    startedAt: a.startedAt, restarts: a.restarts || 0,
   };
 }
 

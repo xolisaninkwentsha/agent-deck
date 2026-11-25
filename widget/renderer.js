@@ -429,7 +429,8 @@ function agentDetails(a) {
     rows.push(h('div', { class: 'd-head', text: 'Schedule' }));
     for (const s of a.schedule.slice(0, 6)) rows.push(h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: s.job }), h('span', { class: 'd-st', text: when(s.nextRun) })));
   }
-  rows.push(h('div', { class: 'd-cwd', text: a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago` }));
+  const restarts = a.restarts ? ` · restarted ${a.restarts}× (last ${ago(a.startedAt)} ago)` : '';
+  rows.push(h('div', { class: 'd-cwd', text: (a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago`) + restarts }));
   return h('div', { class: 'details' }, rows);
 }
 function agentCard({ hub, a }) {
