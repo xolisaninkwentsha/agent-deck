@@ -285,11 +285,27 @@ export function otlpTick(a, now, { waitingTtlMs = 7 * 24 * 3600 * 1000 } = {}) {
 }
 
 // After the machine slept: nothing could arrive while it was suspended, so move the liveness
-// clocks on by the time asleep. An agent that was already silent before the sleep stays silent.
-export function shiftClocks(a, ms) {
+// clocks on by the time asleep (never past now). An agent already silent before the sleep stays silent.
+export function shiftClocks(a, ms, now = Date.now()) {
   if (!(ms > 0)) return;
-  if (a.lastHeartbeat) a.lastHeartbeat += ms;
-  if (a.otlp) for (const r of Object.values(a.otlp.running)) r.lastAt += ms;
+  if (a.lastHeartbeat) a.lastHeartbeat = Math.min(a.lastHeartbeat + ms, now);
+  if (a.otlp) for (const r of Object.values(a.otlp.running)) r.lastAt = Math.min(r.lastAt + ms, now);
+}
+
+// Spots a sleep: check() runs on every tick, snapshot and agent event, so the gap since the last
+// call is at most a tick while the daemon runs. Timers pause during suspend, so whichever of
+// those comes first after waking does the shift. Returns the gap when it was a wake, else 0.
+export function wakeClock(gapMs, tickMs, start = Date.now()) {
+  let last = start;
+  return {
+    check(agents, now = Date.now()) {
+      const gap = now - last;
+      last = Math.max(last, now);
+      if (gap <= gapMs) return 0;
+      for (const a of agents) shiftClocks(a, gap - tickMs, now);
+      return gap;
+    },
+  };
 }
 
 function otlpView(a, now) {

@@ -408,6 +408,19 @@ async function main() {
   assert.equal(ag('sleepy-agent').status, 'idle', 'no "not responding" straight after waking');
   assert.equal(ag('gone-agent').status, 'not_responding', 'an agent already silent before the sleep stays that way');
   assert.match(fs.readFileSync(path.join(HOME, 'daemon.log'), 'utf8'), /woke after \d+ s/);
+  // SIGSTOP can't show this part: in a real suspend timers pause too, so a snapshot or an event
+  // can come before the next tick. The daemon checks the clock there as well; the clock itself:
+  const { wakeClock, newAgent, agentStatus } = await import('../src/agents.mjs');
+  const w0 = Date.now(), clock = wakeClock(30000, 2000, w0);
+  const quiet = Object.assign(newAgent('h:quiet', 'quiet', 'h'), { heartbeat: 60, lastHeartbeat: w0 - 1000 });
+  const eager = Object.assign(newAgent('h:eager', 'eager', 'h'), { heartbeat: 60, lastHeartbeat: w0 - 1000 });
+  assert.equal(clock.check([quiet, eager], w0 + 2000), 0, 'a normal tick is not a wake');
+  const wokeAt = w0 + 2000 + 10 * 60000; // asleep for 10 minutes
+  eager.lastHeartbeat = wokeAt; // its first heartbeat after waking arrived before anything else ran
+  assert.equal(clock.check([quiet, eager], wokeAt), 10 * 60000);
+  assert.equal(agentStatus(quiet, wokeAt), 'idle', '10 minutes asleep is not 10 minutes silent');
+  assert.equal(eager.lastHeartbeat, wokeAt, 'never moved past now');
+  assert.equal(clock.check([quiet, eager], wokeAt + 100), 0, 'one wake, one shift');
   ok('waking from suspend: heartbeat clocks move on by the sleep, so no false "not responding"');
 
   // 9m2. The cron matcher on fixed (local) times.

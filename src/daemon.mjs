@@ -18,7 +18,7 @@ import {
 import { runningSessions, transcriptFor, readTail, lastActivity, contextUsage, contextWindow } from './claude-sessions.mjs';
 import {
   newAgent, applyAgentEvent, agentView, agentStatus, expireJobs, AGENT_NAME, nextRun, cronJobs,
-  otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick, shiftClocks,
+  otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick, wakeClock,
 } from './agents.mjs';
 import { decodeOtlp } from './otlp.mjs';
 import zlib from 'node:zlib';
@@ -94,9 +94,20 @@ function scheduleSave() {
   }, 500);
 }
 
+// ---------- waking from suspend ----------
+// Nothing can arrive while the machine sleeps, so the agents' heartbeat clocks move on by the
+// time asleep. Timers pause during suspend, so this runs on every tick, snapshot and agent event.
+const TICK_MS = 2000;
+const wake = wakeClock(Number(process.env.AGENT_DECK_WAKE_GAP_MS) || 30000, TICK_MS); // a gap this long = the machine slept
+function checkWake(now = Date.now()) {
+  const gap = wake.check(agents.values(), now);
+  if (gap) log(`woke after ${Math.round(gap / 1000)} s: agent heartbeat clocks moved on`);
+}
+
 // ---------- broadcasting ----------
 let broadcastTimer = null;
 function snapshot() {
+  checkWake();
   return {
     type: 'snapshot', host: NAME, version: VERSION, holdSeconds: HOLD_MS / 1000,
     sessions: [...sessions.values()].filter((s) => !s.dismissed).map((s) => publicView(s, { warnPercent: Number(cfg.contextWarnPercent) || 80 })),
@@ -420,6 +431,7 @@ function handleAgent(body) {
   const name = String(body?.agent || '');
   if (!AGENT_NAME.test(name)) return { ok: false, error: 'agent name must be letters, digits, dot, dash or underscore' };
   const key = `${NAME}:${name}`;
+  checkWake(); // before this event moves any clock
   let a = agents.get(key);
   if (!a) {
     if (agents.size >= MAX_AGENTS) return { ok: false, error: 'too many agents' };
@@ -460,6 +472,7 @@ const OTLP_MAX_INFLATED = 16 * 1024 * 1024;
 
 function ingestOtlp(signal, groups) {
   const now = Date.now();
+  checkWake(now); // before these items move any clock
   const ignore = new Set(Array.isArray(cfg.otlpIgnoreServices) ? cfg.otlpIgnoreServices : []);
   for (const g of groups) {
     const service = otlpServiceName(g.resource);
@@ -576,18 +589,10 @@ function jumpTo(s) {
 }
 
 // ---------- housekeeping ----------
-const TICK_MS = 2000;
-const WAKE_GAP_MS = Number(process.env.AGENT_DECK_WAKE_GAP_MS) || 30000; // a tick this late means the machine slept
-let lastTick = Date.now();
 setInterval(() => {
   const now = Date.now();
   let changed = false;
-  const gap = now - lastTick;
-  lastTick = now;
-  if (gap > WAKE_GAP_MS) {
-    for (const a of agents.values()) shiftClocks(a, gap - TICK_MS);
-    log(`woke after ${Math.round(gap / 1000)} s: agent heartbeat clocks moved on`);
-  }
+  checkWake(now);
   const tails = new Map();
   for (const s of sessions.values()) {
     if (s.ended) continue;
