@@ -39,9 +39,8 @@ The daemon is running and **already tracking real sessions**. Be careful when re
 ## Still to do (in priority order)
 
 **Next up (2026-11-25):**
-1. Merge the open PRs once the user says so: CI, this HANDOFF, and plans in the activity window.
-2. Check the service agents' cards once they run a real job.
-3. The Mac: reset to the rewritten history (see "GitHub" below), restart, then the Mac checks under item 13.
+1. Check the service agents' cards once they run a real job.
+2. The Mac: reset to the rewritten history (see "GitHub" below), restart, then the Mac checks under item 13.
 
 The rest: the P2 list (installers, security) and item 9's notification click, which the user never confirmed.
 
@@ -326,7 +325,7 @@ The user asked for any agent that exports OTLP to show in the panel. Design rule
   - **Daemon:** reads only sessions a window watches (`{type:'watch-activity', key}`) and pushes changes. Those sockets get no snapshots.
   - **Works remotely:** the window talks to the session's daemon itself.
 - **Still to do here:**
-  1. **Plans in the activity window:** the session's plan with its steps ticked off (the user asked for "plan and subagent activity"). Built; its PR is open.
+  1. **Plans in the activity window:** the session's plan with its steps ticked off (the user asked for "plan and subagent activity"). Built 2026-11-25: the task list with ticks, and the latest plan from plan mode (approved, rejected or proposed).
   2. **Check the agents' cards on real work:** a running job, waiting items, tokens.
   3. **The Mac** needs the reset above, then `agent-deck restart`.
   4. **One unexplained e2e failure** in seven runs (an unlabelled assertion). Labelled since; CI should catch it if it comes back.
