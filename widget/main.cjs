@@ -26,7 +26,7 @@ function hubsFor(cfg) {
 
 function startPosition(cfg) {
   const area = screen.getPrimaryDisplay().workArea;
-  const saved = cfg.window;
+  const saved = process.argv.includes('--reset-position') ? null : cfg.window;
   if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
     const visible = screen.getAllDisplays().some((d) => {
       const a = d.workArea;
@@ -59,7 +59,23 @@ async function createWindow() {
     app.dock?.hide();
   }
   win.loadFile(path.join(__dirname, 'index.html'));
-  win.once('ready-to-show', () => win.showInactive());
+
+  // Show once the page is ready; fall back to a timer because some Linux setups never
+  // fire ready-to-show for a hidden frameless window. showInactive() doesn't map the
+  // window under GNOME, so Linux uses a normal show().
+  let shown = false;
+  const reveal = (why) => {
+    if (shown || win.isDestroyed()) return;
+    shown = true;
+    if (process.platform === 'linux') win.show(); else win.showInactive();
+    win.setAlwaysOnTop(true, process.platform === 'darwin' ? 'floating' : 'screen-saver');
+    console.log(`[agent-deck] window shown (${why}) at ${JSON.stringify(win.getBounds())}; displays: ${JSON.stringify(screen.getAllDisplays().map((d) => ({ bounds: d.bounds, workArea: d.workArea, scale: d.scaleFactor })))}`);
+  };
+  win.once('ready-to-show', () => reveal('ready'));
+  win.webContents.once('did-finish-load', () => setTimeout(() => reveal('loaded'), 300));
+  setTimeout(() => reveal('timer'), 2500);
+  win.webContents.on('render-process-gone', (_e, d) => console.log('[agent-deck] renderer gone: ' + JSON.stringify(d)));
+  win.webContents.on('console-message', (_e, level, message) => { if (level >= 2) console.log('[agent-deck] page: ' + message); });
 
   // Development aid: AGENT_DECK_SCREENSHOT=/path.png saves an image of the panel and quits.
   if (process.env.AGENT_DECK_SCREENSHOT) {
