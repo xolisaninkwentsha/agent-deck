@@ -1,6 +1,9 @@
 // Unit tests for the relay's WhatsApp module: payloads, webhook parsing, signature check, sender.
 import assert from 'node:assert/strict';
 import { verifySignature, parseWebhook, promptMessage, textMessage, templateMessage, createSender } from '../relay/src/whatsapp.js';
+import { MemoryStore } from '../relay/src/memory-store.js';
+import { CODE_ALPHABET, newCode, findCode, newRef, sha256Hex, normalizeNumber, maskNumber } from '../relay/src/ids.js';
+import { priceFor, reserve, release } from '../relay/src/credit.js';
 
 let passed = 0;
 const check = (name) => { passed++; console.log(`  ✓ ${name}`); };
@@ -144,6 +147,88 @@ async function main() {
   const badJson = await mk(() => ({ ok: true, status: 200, json: async () => { throw new Error('x'); } })).send({});
   assert.equal(badJson.ok, false);
   check('createSender returns ok/id, or ok:false without throwing');
+
+  // store
+  const mstore = new MemoryStore();
+  assert.equal(await mstore.get('nope'), undefined);
+  const origVal = { a: { n: 1 } };
+  await mstore.put('b:2', origVal);
+  origVal.a.n = 99;
+  const stored = await mstore.get('b:2');
+  assert.deepEqual(stored, { a: { n: 1 } });
+  stored.a.n = 5;
+  assert.deepEqual(await mstore.get('b:2'), { a: { n: 1 } });
+  await mstore.put('b:1', 'x');
+  await mstore.put('c:1', 'y');
+  const lst2 = await mstore.list('b:');
+  assert.ok(lst2 instanceof Map);
+  assert.deepEqual([...lst2.keys()], ['b:1', 'b:2']);
+  await mstore.delete('b:1');
+  assert.equal(await mstore.get('b:1'), undefined);
+  assert.equal((await mstore.list('b:')).size, 1);
+  check('MemoryStore get/put/delete/list store clones and list by prefix in key order');
+
+  // numbers
+  assert.equal(normalizeNumber('+27 82 123-4567'), '27821234567');
+  assert.equal(normalizeNumber('0027821234567'), '27821234567');
+  assert.equal(normalizeNumber('082 123 4567'), null);
+  assert.equal(normalizeNumber('+1 (415) 555-0100'), '14155550100');
+  assert.equal(normalizeNumber('12'), null);
+  assert.equal(normalizeNumber('27.82.123.4567'), '27821234567');
+  assert.equal(normalizeNumber('27821234567'), '27821234567');
+  assert.equal(normalizeNumber('+1234567'), null);
+  assert.equal(normalizeNumber('+1234567890123456'), null);
+  assert.equal(normalizeNumber('+12345678'), '12345678');
+  assert.equal(normalizeNumber('+27abc821234567'), null);
+  assert.equal(normalizeNumber(''), null);
+  assert.equal(normalizeNumber(undefined), null);
+  assert.equal(maskNumber('27821234567'), '+27•••••4567');
+  check('normalizeNumber and maskNumber');
+
+  // codes
+  assert.equal(findCode('code: abcd-2345'), 'ABCD2345');
+  assert.equal(findCode('hello'), null);
+  assert.equal(findCode('ABCD 2345 please'), 'ABCD2345');
+  assert.equal(findCode('abcd2345'), 'ABCD2345');
+  assert.equal(findCode('xABCD2345'), null);
+  assert.equal(findCode('ABCD23456'), null);
+  assert.equal(findCode('ABCD-23456'), null);
+  assert.equal(findCode('1ABCD-2345'), null);
+  assert.equal(findCode('ABCD2345!'), 'ABCD2345');
+  assert.equal(findCode('ABCI2345'), null);
+  assert.equal(findCode('ABCDEFGHJ ABCD2345'), 'ABCD2345');
+  for (let i = 0; i < 200; i++) assert.match(newCode(), /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{8}$/);
+  for (let i = 0; i < 200; i++) assert.match(newRef(), /^[abcdefghjkmnpqrstuvwxyz23456789]{12}$/);
+  assert.equal(CODE_ALPHABET, 'ABCDEFGHJKMNPQRSTUVWXYZ23456789');
+  assert.notEqual(newCode(), newCode());
+  assert.equal(await sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  check('codes, refs and sha256Hex');
+
+  // credit
+  const cfg = { rates: { default: 10000, '27': 9500, '2771': 5000 }, markupPercent: 20, billing: 'trial' };
+  assert.equal(priceFor('27821234567', cfg), 11400);
+  assert.equal(priceFor('447000000000', cfg), 12000);
+  assert.equal(priceFor('27711234567', cfg), 6000);
+  assert.equal(priceFor('27821234567', { ...cfg, billing: 'off' }), 0);
+  const acct = { balance: 20000, sent: [] };
+  assert.deepEqual(reserve(acct, 11400, 1000, 60), { ok: true });
+  assert.equal(acct.balance, 8600);
+  assert.deepEqual(reserve(acct, 11400, 2000, 60), { ok: false, reason: 'no-credit' });
+  assert.equal(acct.balance, 8600);
+  assert.equal(acct.sent.length, 1);
+  release(acct, 11400);
+  assert.equal(acct.balance, 20000);
+  assert.equal(acct.sent.length, 0);
+  const rich = { balance: 1e9, sent: [] };
+  for (let i = 0; i < 60; i++) assert.equal(reserve(rich, 1, 1000 + i, 60).ok, true);
+  assert.deepEqual(reserve(rich, 1, 2000, 60), { ok: false, reason: 'rate-limited' });
+  assert.equal(rich.balance, 1e9 - 60);
+  assert.equal(reserve(rich, 1, 1000 + 3600000 + 1, 60).ok, true);
+  const zero = { balance: 0, sent: [] };
+  assert.equal(reserve(zero, 0, 1, 2).ok, true);
+  assert.equal(reserve(zero, 0, 2, 2).ok, true);
+  assert.deepEqual(reserve(zero, 0, 3, 2), { ok: false, reason: 'rate-limited' });
+  check('priceFor, reserve and release');
 
   console.log(`\n${passed} checks passed`);
 }
