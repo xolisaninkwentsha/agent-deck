@@ -112,7 +112,7 @@ export function addHub(name, address, token) {
   const url = hubUrl(address);
   if (!url) return { ok: false, error: 'Address: an IP or host name, optionally with :port (or ws://host:port)' };
   if (token && !/^[A-Za-z0-9._~+/=-]{8,200}$/.test(token)) return { ok: false, error: 'Token: paste it exactly as "agent-deck share" printed it' };
-  const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name);
+  const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name && hubUrl(h.url) !== url); // one entry per machine
   hubs.push({ name, url, token: token || null });
   saveConfig({ hubs });
   return { ok: true, hubs };

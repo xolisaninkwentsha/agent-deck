@@ -32,6 +32,9 @@ const state = {
   settingsOpen: false,
   cfg: {},             // panel settings from the main process (rendererConfig in main.cjs)
   hubDraft: { name: '', address: '', token: '', error: '' }, // the "Add a machine" form
+  ts: { devices: [], pairing: {} }, // your Tailscale devices (Settings), and Connect requests in flight
+  seenPairs: new Set(),  // pairing requests already notified
+  pairBack: {},          // request id -> "also show its sessions here"
 };
 
 // ---------- settings ----------
@@ -101,6 +104,7 @@ function machinesView(row) {
     h('div', { class: 'section-head', text: 'Other machines' }),
     ...remotes.map((x) => row(x.name, `${x.url.replace(/\/ws$/, '')} · ${x.connected ? 'connected' : 'not connected'}`,
       h('button', { class: 'btn ghost', text: 'Remove', onclick: () => window.deck.removeHub(x.name) }))),
+    ...tailscaleRows(row),
     h('div', { class: 'set-row add-hub' },
       h('div', { class: 'set-label' },
         h('div', { text: 'Add a machine' }),
@@ -118,6 +122,7 @@ function machinesView(row) {
       shared && !d.sharing ? h('button', { class: 'btn', text: d.copied ? 'Copied' : 'Copy line', onclick: () => copied(true) }) : null,
       h('button', { class: 'switch' + (shared ? ' on' : ''), role: 'switch', 'aria-checked': String(Boolean(shared)), disabled: d.sharing ? 'true' : null, onclick: () => share(!shared) },
         h('span', { class: 'knob' }))),
+    ...allowedRows(row),
   ];
 }
 async function share(on) {
@@ -131,6 +136,82 @@ async function share(on) {
   state.settingsDirty = true;
   render();
 }
+// ---------- pairing over Tailscale ----------
+const localHub = () => state.hubs.find((x) => x.local);
+// Your own Tailscale devices, found when Settings opens. Connect asks that machine; its panel answers.
+async function loadDevices() {
+  state.ts = { ...state.ts, loading: true, error: '' };
+  state.settingsDirty = true; render();
+  const r = await window.deck.tailscaleDevices();
+  state.ts = { ...state.ts, loading: false, devices: r.ok ? r.devices : [], error: r.ok ? '' : r.error };
+  state.settingsDirty = true; render();
+}
+async function pairWith(dev) {
+  state.ts.pairing = { ...state.ts.pairing, [dev.ip]: 'waiting' };
+  state.settingsDirty = true; render();
+  const r = await window.deck.pair(dev.ip);
+  // It allowed this machine and wants to see this one too: let it in here (checked with Tailscale by the daemon).
+  if (r.ok && r.back) send(localHub(), { type: 'allow-device', ip: dev.ip });
+  state.ts.pairing = { ...state.ts.pairing, [dev.ip]: r.ok ? '' : r.error };
+  if (r.ok) await loadDevices(); else { state.settingsDirty = true; render(); }
+}
+function tailscaleRows(row) {
+  const t = state.ts;
+  const rows = [h('div', { class: 'sub-head' }, h('span', { text: 'Your devices on Tailscale' }),
+    h('button', { class: 'btn ghost small', text: t.loading ? 'Looking…' : 'Refresh', onclick: () => loadDevices() }))];
+  if (t.error) return [...rows, h('div', { class: 'set-hint pad', text: t.error })];
+  const devs = (t.devices || []);
+  if (!devs.length && !t.loading) rows.push(h('div', { class: 'set-hint pad', text: 'No other devices of yours on this tailnet.' }));
+  for (const d of devs) {
+    const waiting = t.pairing?.[d.ip] === 'waiting', err = t.pairing?.[d.ip];
+    const hint = !d.online ? 'offline'
+      : d.added ? 'added'
+        : waiting ? `waiting for Allow on ${d.dns}…`
+          : d.agentDeck ? 'Agent Deck is shared there'
+            : d.outdated ? 'Agent Deck there is older: git pull and restart it there'
+              : 'Agent Deck not found: turn on "Share this machine" there';
+    rows.push(row(d.dns, err && err !== 'waiting' ? err : hint,
+      d.online && d.agentDeck && !d.added && !waiting ? h('button', { class: 'btn allow', text: 'Connect', onclick: () => pairWith(d) }) : null));
+  }
+  return rows;
+}
+// Machines allowed to see this one (paired). Remove disconnects them at once.
+function allowedRows(row) {
+  const devs = localHub()?.devices || [];
+  if (!devs.length) return [];
+  return [h('div', { class: 'sub-head' }, h('span', { text: 'Can see this machine' })),
+    ...devs.map((d) => row(d.dns || d.name, `${d.login}${d.connected ? ' · connected now' : ''}`,
+      h('button', { class: 'btn ghost', text: 'Remove', onclick: () => send(localHub(), { type: 'remove-device', id: d.id }) })))];
+}
+// Another of your machines asks to see this one: a card above everything, and a notification.
+function notifyPairRequests(hub) {
+  for (const r of hub.pairRequests) {
+    if (state.seenPairs.has(r.id)) continue;
+    state.seenPairs.add(r.id);
+    window.deck.notify(`${r.name} wants to see this machine`, 'Open Agent Deck to allow or deny it.', {});
+  }
+}
+function pairCards() {
+  const hub = localHub();
+  return (hub?.pairRequests || []).map((r) => {
+    if (!(r.id in state.pairBack)) state.pairBack[r.id] = r.shared;
+    return h('div', { class: 'card pair' },
+      h('div', { class: 'pair-title', text: `${r.name} wants to see this machine` }),
+      h('div', { class: 'set-hint', text: `${r.login} on Tailscale. If you allow it, its Agent Deck sees your sessions and agents here and can answer their approvals and questions.` }),
+      r.shared ? h('label', { class: 'pair-back' },
+        h('input', { type: 'checkbox', checked: state.pairBack[r.id] ? 'checked' : null, onchange: (e) => { state.pairBack[r.id] = e.target.checked; } }),
+        ` Also show ${r.dns}'s sessions here`) : null,
+      h('div', { class: 'btns' },
+        h('button', { class: 'btn allow', text: 'Allow', onclick: () => decidePair(r, true) }),
+        h('button', { class: 'btn deny', text: 'Deny', onclick: () => decidePair(r, false) })));
+  });
+}
+function decidePair(r, allow) {
+  const back = allow && r.shared && state.pairBack[r.id];
+  send(localHub(), { type: 'pair-decide', id: r.id, allow, back });
+  if (back) window.deck.addHub(r.dns, `${r.ip}:${r.port}`, ''); // it allows this machine in return
+}
+
 function copied(yes) {
   if (yes) { window.deck.copyShareLine(); setTimeout(() => copied(false), 2000); }
   state.hubDraft.copied = yes;
@@ -186,6 +267,13 @@ function connect(hub) {
       hub.sessions = msg.sessions || [];
       hub.agents = msg.agents || [];
       if (msg.host) hub.host = msg.host;
+      if (hub.local) { // pairing requests and allowed devices come only from this machine's own daemon
+        const sig = JSON.stringify(msg.devices || []);
+        if (sig !== hub.devicesSig) { hub.devicesSig = sig; state.settingsDirty = true; }
+        hub.devices = msg.devices || [];
+        hub.pairRequests = msg.pairRequests || [];
+        notifyPairRequests(hub);
+      }
       notifyNewPending(hub);
       notifyAgents(hub); // before notifyChanges, which marks the hub primed
       notifyChanges(hub);
@@ -596,6 +684,8 @@ function render() {
     if (again) { again.focus(); try { again.setSelectionRange(caret[0], caret[1]); } catch {} }
   }
 
+  document.getElementById('requests').replaceChildren(...pairCards());
+
   const footer = document.getElementById('hubs');
   footer.hidden = state.collapsed || state.hubs.length < 2;
   footer.replaceChildren(...state.hubs.map((x) => h('span', { class: 'hub' + (x.connected ? ' up' : ''), title: x.url, text: x.name })));
@@ -628,6 +718,7 @@ document.getElementById('btn-settings').addEventListener('click', () => {
   state.settingsOpen = !state.settingsOpen;
   if (state.settingsOpen) state.collapsed = false;
   render();
+  if (state.settingsOpen) loadDevices();
 });
 window.deck.onApprovals((enabled) => setApprovals(enabled, false));
 // A notification was clicked: open the agent item's link, or jump to the session (this machine only).

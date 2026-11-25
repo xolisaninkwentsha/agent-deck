@@ -502,7 +502,19 @@ async function main() {
     const HOME2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-remote-'));
     const PORT2 = PORT + 1;
     fs.writeFileSync(path.join(HOME2, 'config.json'), JSON.stringify({ port: PORT2, bind: lan, token: 'x'.repeat(32), name: 'remote-test', otlpPort: PORT + 4 }));
-    const d2 = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: { ...env, AGENT_DECK_HOME: HOME2, AGENT_DECK_PORT: String(PORT2) } });
+    // A fake `tailscale` for pairing: answers status/whois from fake-ts.json, which the test rewrites.
+    const FAKE_TS = path.join(HOME2, 'fake-tailscale.cjs'), FAKE_TS_STATE = path.join(HOME2, 'fake-ts.json');
+    fs.writeFileSync(FAKE_TS, `#!${process.execPath}\nconst s = JSON.parse(require('fs').readFileSync(${JSON.stringify(FAKE_TS_STATE)}, 'utf8'));\n`
+      + `const [cmd, , ip] = process.argv.slice(2);\nif (cmd === 'status') console.log(JSON.stringify(s.status));\n`
+      + `else if (cmd === 'whois' && s.whois[ip] === 'garbage') console.log('not json');\n`
+      + `else if (cmd === 'whois' && s.whois[ip]) console.log(JSON.stringify(s.whois[ip]));\nelse { console.error('peer not found'); process.exit(1); }\n`, { mode: 0o755 });
+    const fakeTs = (whoisLan) => fs.writeFileSync(FAKE_TS_STATE, JSON.stringify({
+      status: { Self: { ID: 'self-node', UserID: 1, HostName: 'remote-test', DNSName: 'remote-test.tn.ts.net.', TailscaleIPs: [lan] }, Peer: {} },
+      whois: { [lan]: whoisLan },
+    }));
+    const node = (user, extra = {}) => ({ Node: { StableID: 'mac-node', User: user, Name: 'test-mac.tn.ts.net.', Hostinfo: { Hostname: 'Test Mac' }, ...extra }, UserProfile: { ID: user, LoginName: user === 1 ? 'me@example.com' : 'someone@else.com' } });
+    fakeTs(null);
+    const d2 = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: { ...env, AGENT_DECK_HOME: HOME2, AGENT_DECK_PORT: String(PORT2), AGENT_DECK_TAILSCALE: FAKE_TS, AGENT_DECK_TAILSCALE_CACHE_MS: '0' } });
     try {
       for (let i = 0; i < 40; i++) { try { await fetch(`http://${lan}:${PORT2}/health`); break; } catch { await sleep(100); } }
       assert.equal((await agentPost({ agent: 'intruder', event: 'start' }, lan, PORT2)).status, 403);
@@ -515,8 +527,62 @@ async function main() {
       for (let i = 0; i < 20 && (await otlpTo('127.0.0.1')) !== 200; i++) await sleep(100);
       assert.equal(await otlpTo('127.0.0.1'), 200);
       assert.equal(await otlpTo(lan), 'refused', 'OTLP must not listen on the LAN address');
+      ok('a request from another machine to /agent or /hook is refused (403); loopback is accepted');
+
+      // 9o2. Pairing over Tailscale: the "remote machine" is this one on its LAN address; the fake
+      // tailscale says who that address is.
+      const pairGet = () => fetch(`http://${lan}:${PORT2}/pair`).then((r) => r.status);
+      const pairPost = (body = { shared: true, port: 47615 }) => fetch(`http://${lan}:${PORT2}/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+        .then(async (r) => (r.status === 200 ? r.json() : { status: r.status }));
+      const wsResult = (url) => new Promise((resolve) => {
+        const w = new WebSocket(url);
+        w.on('open', () => resolve({ w, open: true }));
+        w.on('unexpected-response', (_q, res) => resolve({ open: false, status: res.statusCode }));
+        w.on('error', () => resolve({ open: false }));
+      });
+      for (const [label, who] of [['whois fails', null], ['garbage from tailscale', 'garbage'], ['another user\'s device', node(2)], ['a tagged server', node(1, { Tags: ['tag:server'] })]]) {
+        fakeTs(who);
+        assert.equal(await pairGet(), 403, `GET /pair: ${label}`);
+        assert.equal((await pairPost()).status, 403, `POST /pair: ${label}`);
+      }
+      fakeTs(node(1));
+      assert.equal(await pairGet(), 200, 'your own device may ask');
+      assert.equal((await wsResult(`ws://${lan}:${PORT2}/ws`)).status, 401, 'not paired yet: no token, no entry');
+      assert.match((await pairPost()).reason, /no Agent Deck panel is open/, 'nobody to approve: answered at once');
+
+      // A local panel (loopback) and a remote one (with the token) watch the request.
+      const local2 = new WebSocket(`ws://127.0.0.1:${PORT2}/ws`), remote2 = new WebSocket(`ws://${lan}:${PORT2}/ws?token=${'x'.repeat(32)}`);
+      const last2 = { local: null, remote: null }, remoteSawPairing = { v: false };
+      local2.on('message', (d) => { last2.local = JSON.parse(String(d)); });
+      remote2.on('message', (d) => { const m = JSON.parse(String(d)); last2.remote = m; if ('pairRequests' in m || 'devices' in m) remoteSawPairing.v = true; });
+      await Promise.all([local2, remote2].map((w) => new Promise((r) => w.on('open', r))));
+      const until2 = async (pred, label) => { for (let i = 0; i < 40; i++) { if (pred()) return; await sleep(100); } throw new Error('timed out: ' + label); };
+      let answer = pairPost();
+      await until2(() => last2.local?.pairRequests?.length === 1, 'local panel sees the request');
+      const req2 = last2.local.pairRequests[0];
+      assert.deepEqual([req2.name, req2.dns, req2.login, req2.shared], ['Test Mac', 'test-mac', 'me@example.com', true]);
+      remote2.send(JSON.stringify({ type: 'pair-decide', id: req2.id, allow: true })); // another machine can't approve
+      await sleep(400);
+      assert.equal(last2.local.pairRequests.length, 1, 'a remote panel\'s decision is ignored');
+      local2.send(JSON.stringify({ type: 'pair-decide', id: req2.id, allow: true, back: true }));
+      assert.deepEqual(await answer, { name: 'remote-test', approved: true, reason: '', back: true });
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(HOME2, 'devices.json'), 'utf8')).map((x) => x.id), ['mac-node']);
+      const paired = await wsResult(`ws://${lan}:${PORT2}/ws`);
+      assert.equal(paired.open, true, 'paired: in without a token');
+      await until2(() => last2.local?.devices?.[0]?.connected === true, 'shown as connected');
+      assert.equal(remoteSawPairing.v, false, 'requests and the device list never go to another machine\'s panel');
+      const closed = new Promise((r) => paired.w.on('close', (code) => r(code)));
+      local2.send(JSON.stringify({ type: 'remove-device', id: 'mac-node' }));
+      assert.equal(await closed, 4001, 'removing a device disconnects it');
+      assert.equal((await wsResult(`ws://${lan}:${PORT2}/ws`)).status, 401, 'and it can\'t come back');
+      answer = pairPost();
+      await until2(() => last2.local?.pairRequests?.length === 1, 'second request');
+      local2.send(JSON.stringify({ type: 'pair-decide', id: last2.local.pairRequests[0].id, allow: false }));
+      assert.equal((await answer).reason, 'denied');
+      assert.match((await pairPost()).reason, /denied a moment ago/, 'no prompt spam after a Deny');
+      local2.close(); remote2.close();
+      ok('pairing: only your own untagged Tailscale devices may ask; only this machine\'s panel can allow; paired = no token; Remove cuts it off');
     } finally { d2.kill(); }
-    ok('a request from another machine to /agent or /hook is refused (403); loopback is accepted');
   }
 
   // 9p. A web page in a browser on this machine can reach 127.0.0.1 too: refuse it.
