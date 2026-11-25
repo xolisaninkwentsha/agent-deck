@@ -763,6 +763,28 @@ async function main() {
   assert.equal(ot('json-agent').recent.length, 1, 'a standalone model call is not a job');
   ok('OTLP JSON (+gzip): running job with last tool, waiting from span events, finish, tolerant token names, no double counting');
 
+  // As finance-agent and the funding agent send it: a "job <name>" span around untagged model and tool
+  // calls, approval.posted events (approval.kind, chat.thread), and a gauge of open approvals.
+  const T2 = 'a2'.repeat(16), ROOT2 = 'b2'.repeat(8), link1 = 'https://chat.google.com/room/AAA/drafts1', link2 = 'https://chat.google.com/room/AAA/payrun1';
+  await otlpPost('/v1/traces', tracesBody('fin-like', [
+    jspan({ trace: T2, id: 'c4'.repeat(8), parent: ROOT2, name: 'chat claude-sonnet-5-5', attrs: { 'gen_ai.operation.name': 'chat', 'gen_ai.request.model': 'claude-sonnet-5-5', 'gen_ai.usage.input_tokens': 100, 'gen_ai.usage.output_tokens': 10 } }),
+    jspan({ trace: T2, id: 'c5'.repeat(8), parent: ROOT2, name: 'execute_tool xero_lookup', attrs: { 'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.name': 'xero_lookup' } }),
+  ]));
+  await until(() => ot('fin-like')?.job?.job === 'job' && ot('fin-like').step === 'last tool: xero_lookup', 'a running job from calls inside an unfinished job');
+  await otlpPost('/v1/traces', tracesBody('fin-like', [jspan({ trace: T2, id: ROOT2, name: 'job daily', attrs: { 'job.name': 'daily' },
+    events: [{ name: 'approval.posted', attrs: { 'approval.kind': 'drafts', 'chat.thread': link1 } }, { name: 'approval.posted', attrs: { 'approval.kind': 'payrun', 'chat.thread': link2 } }] })]));
+  await until(() => ot('fin-like')?.recent[0]?.job === 'daily' && ot('fin-like').waiting.length === 2, 'the job ends with two lists waiting');
+  assert.equal(ot('fin-like').jobsRunning, 0, 'the job span ends the running job');
+  assert.deepEqual(ot('fin-like').waiting.map((w) => [w.title, w.link]).sort(), [['Approve drafts to send', link1], ['Approve the payment run', link2]]);
+  const openCount = (n, at) => ({ resourceMetrics: [{ resource: resource('fin-like'), scopeMetrics: [{ metrics: [
+    { name: 'agent.approvals.waiting', gauge: { dataPoints: [{ asInt: String(n), timeUnixNano: nanos(at) }] } }] }] }] });
+  await otlpPost('/v1/metrics', openCount(0, Date.now() - 60000)); // counted before the lists were posted
+  await sleep(300);
+  assert.equal(ot('fin-like').waiting.length, 2, 'a count taken before the lists arrived clears nothing');
+  await otlpPost('/v1/metrics', openCount(0, Date.now()));
+  await until(() => ot('fin-like')?.waiting.length === 0, 'both handled: the count says 0');
+  ok('OTLP agents that wrap work in job spans: running job from untagged calls, approval.posted as waiting, the open count clears handled ones');
+
   // Liveness from a heartbeat counter: alive only while it advances; restarts detected.
   const hbBody = (value, start, instance = 'inst-1') => ({ resourceMetrics: [{ resource: resource('hb-agent', { 'service.instance.id': instance }), scopeMetrics: [{ metrics: [
     { name: 'agent.heartbeat', sum: { isMonotonic: true, aggregationTemporality: 2, dataPoints: [{ asInt: String(value), startTimeUnixNano: nanos(start), timeUnixNano: nanos(Date.now()) }] } },
