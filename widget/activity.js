@@ -110,8 +110,8 @@ function detail(a) {
     a.background != null ? h('span', { text: a.background ? 'background' : 'foreground' }) : null)];
   if (a.status === 'stopped') parts.push(h('div', { class: 'd-sec k-stop' }, `Stopped: no end recorded. Last activity ${ago(a.lastAt)} ago.`));
   if (a.steps?.length) {
-    parts.push(h('div', { class: 'd-sec k-steps' }, h('div', { class: 'd-head', text: 'Steps' }),
-      h('div', { class: 'timeline' }, a.steps.map((x, i) => h('div', { class: 'd-row t-step' + (i === 0 && a.status === 'running' ? ' now' : '') },
+    parts.push(h('div', { class: 'd-sec k-steps' }, h('div', { class: 'd-head', text: 'Steps, newest first' }),
+      h('div', { class: 'timeline' }, a.steps.map((x, i) => h('div', { class: 'd-row t-step ' + (i === 0 && a.status === 'running' ? 'now' : 'done'), title: i === 0 && a.status === 'running' ? 'In progress' : 'Done' },
         h('span', { class: 't-dot' }), h('span', { class: 'd-text', title: x.text, text: x.text }), h('span', { class: 'd-st', text: x.ts ? ago(x.ts) : '' }))))));
   }
   if (a.lastText) parts.push(h('div', { class: 'd-sec k-msg' }, h('div', { class: 'd-head', text: a.status === 'running' ? 'Latest message' : 'Last reply' }), h('div', { class: 'last-msg', text: a.lastText })));

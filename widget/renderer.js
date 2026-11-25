@@ -557,7 +557,9 @@ function details(s, hub) {
       h('span', { class: 'd-type', text: 'agent' }), h('span', { class: 'd-text', text: a.type }), h('span', { class: 'd-st', text: ago(a.startedAt) })))));
   }
   if (s.steps.length) {
-    parts.push(sec('steps', 'Steps', h('div', { class: 'timeline' }, s.steps.slice(-8).reverse().map((st, i) => h('div', { class: 'd-row t-step' + (i === 0 ? ' now' : '') },
+    // Every step is a finished tool call, except the newest while the session is still at it.
+    const live = ['working', 'background', 'approval', 'question'].includes(s.status);
+    parts.push(sec('steps', 'Steps, newest first', h('div', { class: 'timeline' }, s.steps.slice(-8).reverse().map((st, i) => h('div', { class: 'd-row t-step ' + (i === 0 && live ? 'now' : 'done'), title: i === 0 && live ? 'In progress' : 'Done' },
       h('span', { class: 't-dot' }), h('span', { class: 'd-text', title: st.text, text: st.text }), h('span', { class: 'd-st', text: ago(st.ts) }))))));
   }
   parts.push(h('button', { class: 'more', text: 'Open the activity window (subagents)', onclick: (e) => { e.stopPropagation(); openActivity(hub, s); } }));
