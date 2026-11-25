@@ -113,7 +113,13 @@ function checkWake(now = Date.now()) {
 const DEVICES_PATH = path.join(HOME, 'devices.json');
 const devices = new Map(); // Tailscale StableID -> { id, dns, name, login, addedAt }
 try { for (const d of JSON.parse(fs.readFileSync(DEVICES_PATH, 'utf8'))) if (d && typeof d.id === 'string') devices.set(d.id, d); } catch {}
-const saveDevices = () => { ensureHome(); fs.writeFileSync(DEVICES_PATH, JSON.stringify([...devices.values()], null, 2) + '\n', { mode: 0o600 }); };
+// Written to a temp file and renamed over, so a reader (or a crash mid-write) never sees half a file.
+const saveDevices = () => {
+  ensureHome();
+  const tmp = `${DEVICES_PATH}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify([...devices.values()], null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, DEVICES_PATH);
+};
 const allowDevice = (dev) => {
   devices.set(dev.id, { id: dev.id, dns: dev.dns, name: dev.name, login: dev.login, addedAt: Date.now() });
   saveDevices();
