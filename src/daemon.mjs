@@ -13,6 +13,7 @@ import {
   loadConfig, ensureHome, machineName, isLoopback, tokensMatch, STATE_PATH, LOG_PATH, PID_PATH, CONFIG_PATH, HOME,
 } from './config.mjs';
 import { ownDevice, plainIp } from './tailscale.mjs';
+import { subagentsDir, scanActivity } from './subagents.mjs';
 import {
   newSession, applyEvent, publicView, describeApproval, describeTool, setStep, todosSummary, STATUS,
 } from './state.mjs';
@@ -133,6 +134,37 @@ function finishPair(r, approved, reason = '') {
   broadcast();
 }
 
+// ---------- the activity window: one session's main thread and its subagents ----------
+// An activity window watches one session ({type:'watch-activity', key}); only watched sessions'
+// subagent folders are read, and the window gets an update whenever something changed.
+const activityCache = new Map(); // session key -> scanActivity cache
+function activityFor(s, now = Date.now()) {
+  const dir = subagentsDir(s.transcript);
+  const { cache, agents } = dir ? scanActivity(dir, activityCache.get(s.key), now) : { cache: null, agents: [] };
+  if (cache) activityCache.set(s.key, cache);
+  const u = s.usage || {};
+  return {
+    type: 'activity', key: s.key, host: NAME,
+    main: {
+      project: s.project, title: s.name || s.title || '', status: s.status, step: s.step,
+      model: u.model || s.context?.model || '', tokensIn: u.tokensIn || 0, tokensOut: u.tokensOut || 0,
+      toolCount: u.toolCount || 0, topTools: (u.tools || []).slice(0, 3),
+      steps: s.steps.slice(-8).reverse().map((x) => ({ ts: x.ts, text: x.text })), lastText: s.lastMessage || '', startedAt: s.startedAt,
+    },
+    agents,
+  };
+}
+function sendActivity(now = Date.now()) {
+  const watched = new Map(); // key -> sockets
+  for (const ws of widgets) if (ws.role === 'activity' && ws.watchKey && ws.readyState === 1) (watched.get(ws.watchKey) || watched.set(ws.watchKey, []).get(ws.watchKey)).push(ws);
+  for (const [key, list] of watched) {
+    const s = sessions.get(key);
+    const msg = JSON.stringify(s ? activityFor(s, now) : { type: 'activity', key, gone: true });
+    for (const ws of list) if (ws.lastActivity !== msg) { ws.lastActivity = msg; ws.send(msg); }
+  }
+  for (const key of activityCache.keys()) if (!watched.has(key)) activityCache.delete(key);
+}
+
 // ---------- broadcasting ----------
 let broadcastTimer = null;
 // Pairing requests and the device list go only to panels on this machine (local), never to
@@ -154,7 +186,7 @@ function broadcast() {
   clearTimeout(broadcastTimer);
   broadcastTimer = setTimeout(() => {
     const remote = JSON.stringify(snapshot(false)), local = JSON.stringify(snapshot(true));
-    for (const ws of widgets) if (ws.readyState === 1) ws.send(ws.local ? local : remote);
+    for (const ws of widgets) if (ws.readyState === 1 && ws.role !== 'activity') ws.send(ws.local ? local : remote);
   }, 60);
   scheduleSave();
 }
@@ -587,6 +619,12 @@ function handleWidgetMessage(ws, msg) {
       ws.approvals = Boolean(msg.approvals);
       ws.send(JSON.stringify(snapshot(ws.local)));
       break;
+    case 'watch-activity': // an activity window: this session's subagents, and no snapshots
+      ws.role = 'activity';
+      ws.watchKey = String(msg.key || '');
+      ws.lastActivity = null;
+      sendActivity();
+      break;
     // Pairing: only a panel on this machine may answer a request or change the device list.
     case 'pair-decide': {
       const r = ws.local && pairRequests.get(msg.id);
@@ -691,6 +729,7 @@ setInterval(() => {
     if (st !== a.lastStatus) { if (a.lastStatus) log(`agent "${a.name}" is now ${st}`); a.lastStatus = st; changed = true; }
   }
   if (changed) broadcast();
+  sendActivity(now);
 }, TICK_MS).unref();
 
 // ---------- server ----------

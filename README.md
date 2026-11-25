@@ -235,6 +235,20 @@ The panel sends a desktop notification when:
 
 At most one notification per session every 10 seconds. **Clicking** one shows the panel and jumps to the session (its tmux pane or VS Code window). Turn them off with **Notifications** in the tray menu (`notifications` in the config).
 
+## Activity window: subagents
+
+The **tree button** on a card, or **Open the activity window** in its expanded view, opens a window for that session. It shows the main session and every subagent it started as an outline, with connector lines showing who started whom. A subagent started by another subagent sits under it.
+
+- **Each row:** Bolt, the type and description, and the status:
+  - running, with a timer;
+  - done, with how long it took;
+  - stopped: it never recorded an end and has been quiet for 3 minutes.
+- **Under each row:** its current step, tool count and tokens.
+- **Click a row** for its steps, newest first, and its latest message or last reply. **Running only** hides finished work.
+- **Where the data comes from:** Claude Code keeps each subagent's transcript and a small description file next to the session's transcript (`<session>/subagents/`). The window is built from those, so it works for watch-only sessions, and from another machine's panel through its share.
+- **Cost:** only sessions with a window open are read, at most the 60 most recently active subagents, a little at a time.
+- **Privacy:** it shows the same kind of text as the cards: descriptions, step summaries and a short last message, never full prompts or tool output.
+
 ## Bolt, and the line under each session
 
 Each card has **Bolt**, a small robot whose state follows the session's:

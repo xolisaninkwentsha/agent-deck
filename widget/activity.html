@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src ws: wss:; img-src 'self' data:">
+  <title>Activity</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="activity.css">
+</head>
+<body class="activity">
+  <header id="a-bar">
+    <div class="a-title"><span class="brand">Activity</span><span id="a-name"></span></div>
+    <div id="a-counts"></div>
+    <button class="pill" id="a-filter" type="button" aria-pressed="false">Running only</button>
+  </header>
+  <main id="a-tree"></main>
+  <script src="shared.js"></script>
+  <script src="activity.js"></script>
+</body>
+</html>

@@ -286,6 +286,29 @@ ipcMain.on('save-settings', (_e, patch) => {
 
 ipcMain.handle('config', () => rendererConfig());
 
+// The activity window: one session's subagents, from the card's activity button. One window per
+// session (reused); it talks to that session's daemon itself, with the panel's address and token.
+const activityWindows = new Map(); // hubUrl|key -> BrowserWindow
+ipcMain.on('open-activity', (_e, p) => {
+  if (!p || typeof p.key !== 'string' || typeof p.hubUrl !== 'string' || !/^wss?:\/\/[^/?#]+\/ws$/.test(p.hubUrl)) return;
+  const id = `${p.hubUrl}|${p.key}`;
+  const open = activityWindows.get(id);
+  if (open && !open.isDestroyed()) { open.show(); open.focus(); return; }
+  const title = String(p.title || 'Session').slice(0, 100);
+  const w = new BrowserWindow({
+    width: 560, height: 720, minWidth: 420, minHeight: 260, title: `Activity · ${title}`, autoHideMenuBar: true,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? BG.dark : BG.light, icon: nativeImage.createFromPath(path.join(__dirname, 'icon.png')),
+    webPreferences: { preload: path.join(__dirname, 'activity-preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false },
+  });
+  activityWindows.set(id, w);
+  w.on('closed', () => activityWindows.delete(id));
+  w.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  w.webContents.on('will-navigate', (e) => e.preventDefault());
+  // On every load, so a reload works too.
+  w.webContents.on('did-finish-load', () => w.webContents.send('activity-init', { hubUrl: p.hubUrl, token: typeof p.token === 'string' ? p.token : null, key: p.key, title }));
+  w.loadFile(path.join(__dirname, 'activity.html'));
+});
+
 ipcMain.on('tray-state', (_e, st) => {
   if (!TRAY_STATES.includes(st) || st === trayState) return;
   trayState = st;

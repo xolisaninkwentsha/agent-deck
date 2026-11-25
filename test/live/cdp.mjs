@@ -3,7 +3,8 @@
 //   node cdp.mjs <port> shot <out.png>
 const [port, cmd, arg] = process.argv.slice(2);
 const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-const page = targets.find((t) => t.type === 'page');
+// CDP_URL=activity picks a window by its page URL (e.g. the activity window); default: the first page.
+const page = targets.find((t) => t.type === 'page' && (!process.env.CDP_URL || t.url.includes(process.env.CDP_URL)));
 if (!page) { console.error('no page target'); process.exit(1); }
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r) => ws.addEventListener('open', r));
