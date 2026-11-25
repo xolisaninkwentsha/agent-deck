@@ -469,6 +469,7 @@ async function main() {
     w.on('unexpected-response', () => resolve(false));
   });
   assert.equal(await wsOpens('https://evil.example'), false, 'a web page must not get a WebSocket');
+  assert.equal(await wsOpens('null'), false, 'nor a sandboxed iframe (Origin: null)');
   assert.equal(await wsOpens('file://'), true, 'the panel (file://) must');
   assert.equal(await wsOpens(null), true, 'local tools without an Origin must');
   ok('web pages are refused: POSTs with an Origin or a non-JSON body, WebSockets from web origins');

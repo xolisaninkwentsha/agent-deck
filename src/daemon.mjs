@@ -542,7 +542,9 @@ function refusedPost(req, res) {
   if (type !== 'application/json') { log(`refused ${req.url}: content-type "${type}"`); res.writeHead(415).end(); return true; }
   return false;
 }
-const PANEL_ORIGINS = new Set(['file://', 'null']);
+// The Electron panel sends exactly "file://" (checked). Not "null": a sandboxed iframe on any
+// web page sends that.
+const PANEL_ORIGINS = new Set(['file://']);
 
 function handleRequest(req, res) {
   const remote = req.socket.remoteAddress;
