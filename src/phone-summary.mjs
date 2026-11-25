@@ -10,12 +10,21 @@ const QUOTED_OR_BARE = `("[^"]*"|'[^']*'|[^\\s"']+)`;
 const MASKS = [
   // Authorization header values and bare Bearer tokens
   [/\b(authorization\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?|bearer\s+)[^\s"']+/gi, `$1${MASK}`],
+  // Cookie / Set-Cookie headers: the whole value
+  [/\b((?:set-)?cookie\s*:\s*)[^"'\r\n]+/gi, `$1${MASK}`],
+  // X-Api-Key: x, X-Auth-Token: x (Authorization is handled above)
+  [/\b(?!authorization\b)([\w-]*(?:token|key|secret|password|pass|auth)[\w-]*\s*:\s*)[^\s"']+/gi, `$1${MASK}`],
+  // curl -u user:pass, --user user:pass
+  [/(\s(?:-u|--user)(?:=|\s+))[^\s"':]+:[^\s"']+/g, `$1${MASK}`],
+  // mysql -phunter2 (attached only; "-p 8080" is a port)
+  [/(\s-p)(?!rint\b|rune\b|erm\b|ath\b)[^\s"'-][^\s"']*/g, `$1${MASK}`],
   // --token=x, --password x
   [new RegExp(`(--(?:token|key|secret|password|pass|pwd|auth|api-key)(?:=|\\s+))${QUOTED_OR_BARE}`, 'gi'), `$1${MASK}`],
   // API_KEY=x, DB_PASSWORD="x"
   [new RegExp(`(\\b[A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASS|PWD|AUTH)[A-Za-z0-9_]*=)${QUOTED_OR_BARE}`, 'gi'), `$1${MASK}`],
-  // JSON "api_key": "x"
-  [/("[^"]*(?:key|token|secret|password)[^"]*"\s*:\s*")[^"]*(")/gi, `$1${MASK}$2`],
+  // JSON "api_key": "x" (also shell-escaped \"api_key\": \"x\", and bare numbers)
+  [/(\\?"[^"\\]*(?:key|token|secret|password)[^"\\]*\\?"\s*:\s*)(?:(\\?")[^"\\]*(\\?")|[^\s,}\]"\\]+)/gi,
+    (_, label, q1, q2) => (q1 === undefined ? `${label}${MASK}` : `${label}${q1}${MASK}${q2}`)],
   // scheme://user:pass@host
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, `$1${MASK}@`],
   // JWTs

@@ -22,6 +22,28 @@ function main() {
   assert.equal(maskSecrets('ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4'), M);
   check('masks JWTs and long mixed letter-digit tokens');
 
+  assert.equal(maskSecrets('curl -H "X-Api-Key: abc123secret" https://x.io'), `curl -H "X-Api-Key: ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "Cookie: sid=abc; theme=dark" -H "Accept: text/html" https://x.io'), `curl -H "Cookie: ${M}" -H "Accept: text/html" https://x.io`);
+  assert.equal(maskSecrets('curl -H "Authorization: Basic dXNlcjpwYXNz" https://x.io'), `curl -H "Authorization: Basic ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "Authorization: Token abc123" https://x.io'), `curl -H "Authorization: Token ${M}" https://x.io`);
+  check('masks header values (api keys, cookies, Basic and Token schemes)');
+
+  assert.equal(maskSecrets('curl -d "{\\"password\\": \\"hunter2\\"}" https://x.io'), `curl -d "{\\"password\\": \\"${M}\\"}" https://x.io`);
+  assert.equal(maskSecrets('echo \'{"token": 12345, "name": "x"}\''), `echo '{"token": ${M}, "name": "x"}'`);
+  check('masks shell-escaped JSON and non-string JSON secret values');
+
+  assert.equal(maskSecrets('curl -u admin:hunter2 https://x.io'), `curl -u ${M} https://x.io`);
+  assert.equal(maskSecrets('curl --user admin:hunter2 https://x.io'), `curl --user ${M} https://x.io`);
+  assert.equal(maskSecrets('mysql -uroot -phunter2 app'), `mysql -uroot -p${M} app`);
+  check('masks user:pass credentials and attached -p passwords');
+
+  assert.equal(maskSecrets('API_KEY="abc def" run'), `API_KEY=${M} run`);
+  assert.equal(maskSecrets('DB_PASSWORD=\'a b\' run'), `DB_PASSWORD=${M} run`);
+  check('masks quoted NAME=value values');
+
+  for (const plain of ['serve -p 8080', 'docker run -p 3000:3000 img', 'find . -print', 'mysql -u root app', 'curl -H "Accept: text/html" https://x.io', 'ssh -p 22 host']) assert.equal(maskSecrets(plain), plain);
+  check('leaves port flags and ordinary headers alone');
+
   for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/agent-deck/node_modules']) assert.equal(maskSecrets(plain), plain);
   check('leaves ordinary commands alone');
 
