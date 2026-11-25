@@ -28,6 +28,15 @@ function main() {
   assert.equal(maskSecrets('curl -H "Authorization: Token abc123" https://x.io'), `curl -H "Authorization: Token ${M}" https://x.io`);
   check('masks header values (api keys, cookies, Basic and Token schemes)');
 
+  assert.equal(maskSecrets('curl -H "Authorization-Token: abc123" https://x.io'), `curl -H "Authorization-Token: ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "AuthorizationKey: abc" https://x.io'), `curl -H "AuthorizationKey: ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "X-Authorization-Secret: s3cret" https://x.io'), `curl -H "X-Authorization-Secret: ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "X_Authorization: abc" https://x.io'), `curl -H "X_Authorization: ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "MyAuthorization: abc" https://x.io'), `curl -H "MyAuthorization: ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "Authorization: Bearer x" https://x.io'), `curl -H "Authorization: Bearer ${M}" https://x.io`);
+  assert.equal(maskSecrets('curl -H "X-Authorization: Bearer x" https://x.io'), `curl -H "X-Authorization: Bearer ${M}" https://x.io`);
+  check('masks headers that only start or end with Authorization; the exact header is masked once');
+
   assert.equal(maskSecrets('curl -d "{\\"password\\": \\"hunter2\\"}" https://x.io'), `curl -d "{\\"password\\": \\"${M}\\"}" https://x.io`);
   assert.equal(maskSecrets('echo \'{"token": 12345, "name": "x"}\''), `echo '{"token": ${M}, "name": "x"}'`);
   check('masks shell-escaped JSON and non-string JSON secret values');
@@ -37,6 +46,11 @@ function main() {
   assert.equal(maskSecrets('{"api_key": "ABC"}'), `{"api_key": "${M}"}`);
   assert.equal(maskSecrets('curl -d "{\\"password\\": \\"hun\\\\\\"ter2\\"}" https://x.io'), `curl -d "{\\"password\\": \\"${M}\\"}" https://x.io`);
   check('masks JSON values that contain escapes');
+
+  assert.equal(maskSecrets('echo \\"password\\": \\"hunter2\\" next'), `echo \\"password\\": \\"${M}\\" next`);
+  assert.equal(maskSecrets('echo \\"password\\": \\"hunter2 next'), `echo \\"password\\": \\"${M} next`);
+  assert.equal(maskSecrets('echo {"password": "hunter2 next'), `echo {"password": "${M} next`);
+  check('a matched JSON label always masks its value, even when no terminator or closing quote follows');
 
   assert.equal(maskSecrets('X-' + 'a'.repeat(100) + '-Api-Key: s3cret'), 'X-' + 'a'.repeat(100) + `-Api-Key: ${M}`);
   assert.equal(maskSecrets('A'.repeat(100) + '_TOKEN=abc'), 'A'.repeat(100) + `_TOKEN=${M}`);
@@ -51,7 +65,8 @@ function main() {
   assert.equal(maskSecrets("mysql -u root -p'x y' db"), `mysql -u root -p${M} db`);
   check('masks -p passwords after wrappers, env prefixes, subshells, newlines and in quotes');
 
-  for (const hostile of ['a'.repeat(50000) + '-key', 'x-'.repeat(25000), 'K'.repeat(50000), '"key' + ' '.repeat(50000), 'a'.repeat(50000) + '://']) {
+  for (const hostile of ['a'.repeat(50000) + '-key', 'x-'.repeat(25000), 'K'.repeat(50000), '"key' + ' '.repeat(50000), 'a'.repeat(50000) + '://',
+    '\\"password\\": \\"'.repeat(3200) + 'x', '\\"password\\": \\"x\\" y '.repeat(2500), '\\"key\\":\\"'.repeat(4500) + 'x', '"key": "'.repeat(6000) + 'x']) {
     const t0 = performance.now();
     maskSecrets(hostile);
     assert.ok(performance.now() - t0 < 200, `maskSecrets too slow on ${hostile.slice(0, 8)}`);

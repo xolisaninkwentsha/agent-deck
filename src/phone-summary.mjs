@@ -15,8 +15,10 @@ const MASKS = [
   [/\b(authorization\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?|bearer\s+)[^\s"']+/gi, `$1${MASK}`],
   // Cookie / Set-Cookie headers: the whole value
   [/\b((?:set-)?cookie\s*:\s*)[^"'\r\n]+/gi, `$1${MASK}`],
-  // X-Api-Key: x, X-Auth-Token: x. Anchored on the keyword plus a bounded suffix, so the name's length can't matter; Authorization is handled above.
-  [/((?:token|key|secret|password|pass|auth)[\w-]{0,64}\s*:\s*)[^\s"']+/gi, (m, label) => (/^authorization/i.test(label) ? m : `${label}${MASK}`)],
+  // X-Api-Key: x, X-Auth-Token: x, Authorization-Token: x. Anchored on the keyword plus a bounded suffix, so the name's length can't matter.
+  // Only the exact Authorization header is skipped (the first rule masked it, so its scheme word stays); that rule needs a word boundary, so X_Authorization: is masked here.
+  [/((?:token|key|secret|password|pass|auth)[\w-]{0,64}\s*:\s*)[^\s"']+/gi,
+    (m, label, at, str) => (/^authorization\s*:/i.test(label) && !/\w/.test(str[at - 1] ?? '') ? m : `${label}${MASK}`)],
   // curl -u user:pass, --user user:pass
   [/(\s(?:-u|--user)(?:=|\s+))[^\s"':]+:[^\s"']+/g, `$1${MASK}`],
   // --token=x, --password x
@@ -24,9 +26,11 @@ const MASKS = [
   // API_KEY=x, DB_PASSWORD="x"
   [new RegExp(`((?:TOKEN|KEY|SECRET|PASS|PWD|AUTH)[A-Za-z0-9_]{0,64}=)${QUOTED_OR_BARE}`, 'gi'), `$1${MASK}`],
   // JSON "api_key": "x" (also shell-escaped \"api_key\": \"x\", escapes inside the value, and bare numbers).
-  // An escaped value ends at a \" that is followed by , } ] " or the end, so a secret holding \" doesn't end it early.
-  [/((?:key|token|secret|password)[^"\\]{0,64}\\?"\s*:\s*)(?:(\\")[^]*?(\\")(?=\s*(?:[,}\]"]|$))|(")((?:[^"\\]|\\.)*)(")|[^\s,}\]"\\]+)/gi,
-    (_, label, e1, e2, p1, _body, p3) => (e1 ? `${label}${e1}${MASK}${e2}` : p1 ? `${label}${p1}${MASK}${p3}` : `${label}${MASK}`)],
+  // A matched label always masks its value. An escaped value ends at the first \" followed by , } ] " or the end
+  // (so a secret holding \" isn't cut early), else at the next \", else at whitespace; a plain one at its closing " or whitespace.
+  // The first scan is bounded by the masking input cap so many labels can't make it quadratic.
+  [/((?:key|token|secret|password)[^"\\]{0,64}\\?"\s*:\s*)(?:(\\")(?:[^]{0,2000}?(?=\\"\s*(?:[,}\]"]|$))|[^]*?(?=\\")|[^\s"']+)(\\")?|(")(?:(?:[^"\\]|\\.)*(")|[^\s"']+)|[^\s,}\]"\\]+)/gi,
+    (_, label, escOpen, escClose, open, close) => `${label}${escOpen || open || ''}${MASK}${escClose || close || ''}`],
   // scheme://user:pass@host
   [/(\b[a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:]+:[^\s/@]+@/gi, `$1${MASK}@`],
   // JWTs
