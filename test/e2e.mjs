@@ -96,9 +96,10 @@ async function main() {
   assert.equal(JSON.parse(r.out).hookSpecificOutput.decision.behavior, 'deny');
   ok('approval: deny');
 
-  // 7. Question answered from the widget (PreToolUse on AskUserQuestion).
+  // 7. Question answered from the widget on PreToolUse (bypassPermissions mode, where the
+  //    PermissionRequest route is unverified).
   const questions = [{ question: 'Which audio format?', header: 'Format', multiSelect: false, options: [{ label: 'Opus', description: 'small' }, { label: 'WAV', description: 'raw' }] }];
-  const pending3 = hook('decide', base('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions }, tool_use_id: 'q1' }));
+  const pending3 = hook('decide', base('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions }, tool_use_id: 'q1', permission_mode: 'bypassPermissions' }));
   await until(() => sess()?.pending?.kind === 'question', 'question pending');
   let lastQ = sess().pending.id;
   assert.equal(sess().status, 'question');
@@ -109,9 +110,40 @@ async function main() {
   assert.equal(qo.permissionDecision, 'allow');
   assert.deepEqual(qo.updatedInput.answers, { 'Which audio format?': 'Opus' });
   assert.deepEqual(qo.updatedInput.questions, questions);
-  ok('question: answer goes back as allow + updatedInput.answers');
+  ok('question (bypass mode): answered on PreToolUse as allow + updatedInput.answers');
 
-  // 8. "Answer in terminal" releases with no output; a follow-up PermissionRequest for the same question isn't held again.
+  // 7b. In a verified mode the PreToolUse for a question passes straight through...
+  let t = Date.now();
+  r = await hook('decide', base('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions }, tool_use_id: 'q5', permission_mode: 'default' }));
+  assert.equal(r.out, '');
+  assert.ok(Date.now() - t < 1500, 'PreToolUse question in default mode should not be held');
+  await until(() => sess()?.pending === null, 'no pending after a pass-through PreToolUse');
+  ok('question (default mode): PreToolUse is not held, so the terminal shows the question at once');
+
+  // 7c. ...and the question is answered on its PermissionRequest instead.
+  const pq = hook('decide', base('PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: { questions }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.kind === 'question', 'question pending on PermissionRequest');
+  const pqId = sess().pending.id;
+  ws.send(JSON.stringify({ type: 'decide', pendingId: pqId, decision: { answers: { 'Which audio format?': 'WAV' } } }));
+  r = await pq;
+  const pqo = JSON.parse(r.out).hookSpecificOutput;
+  assert.equal(pqo.hookEventName, 'PermissionRequest');
+  assert.equal(pqo.decision.behavior, 'allow');
+  assert.deepEqual(pqo.decision.updatedInput, { questions, answers: { 'Which audio format?': 'WAV' } });
+  ok('question (default mode): answered on PermissionRequest as allow + updatedInput.answers');
+
+  // 7d. "Terminal" on a PermissionRequest question hands it back at once.
+  const pq2 = hook('decide', base('PermissionRequest', { tool_name: 'AskUserQuestion', tool_input: { questions: [{ ...questions[0], question: 'Again?' }] }, permission_mode: 'default' }));
+  await until(() => sess()?.pending?.kind === 'question' && sess().pending.id !== pqId, 'second PermissionRequest question');
+  t = Date.now();
+  ws.send(JSON.stringify({ type: 'release', pendingId: sess().pending.id }));
+  r = await pq2;
+  assert.equal(r.out, '');
+  assert.ok(Date.now() - t < 1500);
+  ok('question (default mode): "Terminal" releases the PermissionRequest straight away');
+
+  // 8. (No permission_mode, as from an older Claude Code: PreToolUse route.)
+  //    "Answer in terminal" releases with no output; a follow-up PermissionRequest for the same question isn't held again.
   const pending4 = hook('decide', base('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions }, tool_use_id: 'q2' }));
   await until(() => sess()?.pending?.kind === 'question' && sess().pending.id !== lastQ, 'question 2');
   ws.send(JSON.stringify({ type: 'release', pendingId: sess().pending.id }));

@@ -21,6 +21,14 @@ const NAME = machineName(cfg);
 const PORT = Number(cfg.port);
 const BIND = cfg.bind;
 const HOLD_MS = Math.max(5, Number(cfg.holdSeconds) || 90) * 1000;
+// Which hook the panel answers a question (AskUserQuestion) on. While the PermissionRequest
+// for AskUserQuestion is pending, Claude Code already shows the question in the terminal, so
+// answering there never keeps someone at the terminal waiting. That was verified live (Claude
+// Code 2.1.332) in these modes only. Any other mode (bypassPermissions, dontAsk, unknown or
+// missing) answers on PreToolUse as before, which keeps the question out of the terminal
+// while the panel holds it.
+const PERMISSION_REQUEST_QUESTION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto']);
+const questionHookFor = (input) => (PERMISSION_REQUEST_QUESTION_MODES.has(input.permission_mode) ? 'PermissionRequest' : 'PreToolUse');
 // Development aid: AGENT_DECK_EVENT_LOG=/path.jsonl appends every raw hook payload there.
 const EVENT_LOG = process.env.AGENT_DECK_EVENT_LOG || null;
 
@@ -202,6 +210,11 @@ async function handleHook(body, res) {
   if (mode === 'decide') {
     const tool = input.tool_name;
     const isQuestion = tool === 'AskUserQuestion';
+    if (isQuestion && event !== questionHookFor(input)) {
+      // Questions are answered on one hook only; the other just lets Claude Code carry on.
+      broadcast();
+      return null;
+    }
     let skip = !approversConnected();
     if (isQuestion) {
       const fp = questionFingerprint(s.key, input.tool_input?.questions);

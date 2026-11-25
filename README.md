@@ -64,14 +64,14 @@ Run that on the Mac. The panel picks it up within a few seconds, and each card s
 
 ## Approvals and questions: how the hand-off works
 
-When Claude Code is about to ask for permission (or asks a question), the daemon holds the request and shows it on the card.
+When Claude Code asks for permission, asks for a plan approval, or asks you a question, the card shows it with buttons.
 
-- If you answer in the panel, Claude Code continues straight away and the terminal never prompts.
-- If you don't answer within **90 seconds** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the normal prompt appears in the terminal.
+- **Claude Code shows its normal prompt in the terminal at the same time**, so answer wherever you are. If you answer in the panel, the terminal prompt closes and Claude carries on.
+- For questions this holds in the default, accept-edits, plan and auto permission modes (checked with Claude Code 2.1.332). In any other mode (for example bypass permissions) the panel gets the question *first*, and the terminal only shows it after you click **Terminal** or the hold runs out.
+- If nobody answers in the panel within **90 seconds** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer.
 - If no panel is open, nothing is held: Claude Code behaves exactly as before.
 - The **shield** button in the panel header turns this off. With it off, the panel only watches and every prompt goes to the terminal.
-
-The trade-off: while the shield is on, a prompt shows up in the panel *first*. If you're sitting at that terminal, click **Terminal** on the card (or turn the shield off) to answer there.
+- Known issue: if you answer in the terminal, the card can keep its buttons until the hold runs out. Clicking them then does nothing.
 
 "Always" applies the rule Claude Code suggests (for example "always allow `npm run test`"), the same as choosing "Yes, don't ask again" in the terminal.
 
@@ -117,7 +117,7 @@ node test/demo.mjs          # four fake sessions, one approval, one question. Ct
 ## Tests
 
 ```bash
-npm test                    # 13 end-to-end checks: hook script -> daemon -> fake panel
+npm test                    # end-to-end checks: hook script -> daemon -> fake panel
 ```
 
 ## Uninstall
