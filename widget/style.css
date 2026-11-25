@@ -275,9 +275,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .t-step::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 1px; background: var(--line); }
 .t-step:first-child::before { top: .7em; }
 .t-step:last-child::before { bottom: calc(100% - .7em); }
-.t-dot { position: absolute; left: 0; top: .42em; width: 7px; height: 7px; border-radius: 50%; background: var(--card); border: 1px solid var(--faint); }
+/* finished steps: a green dot with a tick; the step in progress: the accent dot, pulsing */
+.t-dot { position: absolute; left: -1px; top: .32em; width: 9px; height: 9px; border-radius: 50%; background: var(--card); border: 1px solid var(--faint); }
+.t-step.done .t-dot { background: var(--background); border-color: var(--background); }
+.t-step.done .t-dot::after { content: ""; position: absolute; left: 2.6px; top: 1px; width: 2px; height: 4.2px; border: solid var(--card); border-width: 0 1.3px 1.3px 0; transform: rotate(45deg); }
 .timeline .t-step.now { color: var(--text); }
-.t-step.now .t-dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.t-step.now .t-dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); animation: step-pulse 1.6s ease-in-out infinite; }
+@keyframes step-pulse { 50% { box-shadow: 0 0 0 5px transparent; } }
+@media (prefers-reduced-motion: reduce) { .t-step.now .t-dot { animation: none; } }
 .d-row { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
 .d-type { color: var(--background); font-size: 10.5px; flex: none; }
 .k-sub .d-type { color: var(--question); }
