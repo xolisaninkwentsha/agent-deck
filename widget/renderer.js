@@ -603,7 +603,7 @@ function details(s) {
     parts.push(sec('steps', 'Steps', h('div', { class: 'timeline' }, s.steps.slice(-8).reverse().map((st, i) => h('div', { class: 'd-row t-step' + (i === 0 ? ' now' : '') },
       h('span', { class: 't-dot' }), h('span', { class: 'd-text', title: st.text, text: st.text }), h('span', { class: 'd-st', text: ago(st.ts) }))))));
   }
-  parts.push(h('div', { class: 'd-cwd', title: s.cwd }, h('span', { class: 'ti', html: ICONS.folder }), s.cwd));
+  parts.push(h('div', { class: 'd-cwd', title: s.cwd }, h('span', { class: 'ti', html: ICONS.folder }), h('span', { class: 'cwd-text', text: s.cwd })));
   return h('div', { class: 'details' }, parts);
 }
 
@@ -704,7 +704,7 @@ function agentDetails(a) {
     parts.push(sec('sched', 'Schedule', a.schedule.slice(0, 6).map((x) => h('div', { class: 'd-row' }, h('span', { class: 'd-text', text: x.job }), h('span', { class: 'd-st', text: when(x.nextRun) })))));
   }
   const restarts = a.restarts ? ` · restarted ${a.restarts}× (last ${ago(a.startedAt)} ago)` : '';
-  parts.push(h('div', { class: 'd-cwd' }, (a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago`) + restarts));
+  parts.push(h('div', { class: 'd-cwd' }, h('span', { class: 'cwd-text' }, (a.heartbeat ? `Heartbeat every ${span(a.heartbeat * 1000)}, last ${ago(a.lastHeartbeat)} ago` : `Last heard from ${ago(a.lastSeen)} ago`) + restarts)));
   return h('div', { class: 'details' }, parts);
 }
 function agentCard({ hub, a }) {
