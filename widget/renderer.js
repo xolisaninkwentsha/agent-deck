@@ -108,9 +108,28 @@ function machinesView(row) {
         h('div', { class: 'add-fields' }, field('name', 'name'), field('address', 'address, e.g. 100.101.102.103'), field('token', 'token')),
         d.error ? h('div', { class: 'set-error', text: d.error }) : null),
       h('button', { class: 'btn allow', text: 'Add', onclick: addMachine })),
-    row('This machine', shared ? `Shared on ${shared}. Copy the line and paste it into the other panel.` : 'Not shared. Run "agent-deck share <Tailscale IP>" to let another panel see it.',
-      shared ? h('button', { class: 'btn', text: d.copied ? 'Copied' : 'Copy line', onclick: () => copied(true) }) : null),
+    h('div', { class: 'set-row' },
+      h('div', { class: 'set-label' },
+        h('div', { text: 'Share this machine' }),
+        h('div', { class: 'set-hint', text: d.sharing ? 'Restarting Agent Deck\'s daemon…'
+          : shared ? `Shared on ${shared}. Copy the line and paste it into the other panel's "Add a machine".`
+            : 'Lets your other computers\' panels see this one, over Tailscale. Restarts the daemon: a prompt the panel is holding goes back to the terminal.' }),
+        d.shareError ? h('div', { class: 'set-error', text: d.shareError }) : null),
+      shared && !d.sharing ? h('button', { class: 'btn', text: d.copied ? 'Copied' : 'Copy line', onclick: () => copied(true) }) : null,
+      h('button', { class: 'switch' + (shared ? ' on' : ''), role: 'switch', 'aria-checked': String(Boolean(shared)), disabled: d.sharing ? 'true' : null, onclick: () => share(!shared) },
+        h('span', { class: 'knob' }))),
   ];
+}
+async function share(on) {
+  const d = state.hubDraft;
+  if (d.sharing) return;
+  Object.assign(d, { sharing: true, shareError: '' });
+  state.settingsDirty = true;
+  render();
+  const r = await window.deck.share(on);
+  Object.assign(d, { sharing: false, shareError: r.ok ? '' : r.error });
+  state.settingsDirty = true;
+  render();
 }
 function copied(yes) {
   if (yes) { window.deck.copyShareLine(); setTimeout(() => copied(false), 2000); }
