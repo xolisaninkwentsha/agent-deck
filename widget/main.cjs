@@ -91,6 +91,7 @@ function updateTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: visible ? 'Hide panel' : 'Show panel', click: togglePanel },
     { label: 'Answer approvals here', type: 'checkbox', checked: approvals, click: (item) => setApprovals(item.checked, true) },
+    { label: 'Notifications', type: 'checkbox', checked: config?.loadConfig().notifications !== false, click: (item) => { config.saveConfig({ notifications: item.checked }); updateTray(); } },
     { type: 'separator' },
     { label: 'Quit Agent Deck', click: () => app.quit() },
   ]));
@@ -228,7 +229,7 @@ async function createWindow() {
 
 function rendererConfig() {
   const cfg = config.loadConfig();
-  return { hubs: hubsFor(cfg), approvalsInWidget: cfg.approvalsInWidget !== false, platform: process.platform };
+  return { hubs: hubsFor(cfg), approvalsInWidget: cfg.approvalsInWidget !== false, platform: process.platform, notifyAfterSeconds: Number(cfg.notifyAfterSeconds) || 30 };
 }
 
 ipcMain.handle('config', () => rendererConfig());
@@ -244,8 +245,23 @@ ipcMain.on('resize', (_e, height) => {
 
 ipcMain.on('set-approvals', (_e, enabled) => setApprovals(enabled, false));
 
-ipcMain.on('notify', (_e, { title, body }) => {
-  if (Notification.isSupported()) new Notification({ title: String(title).slice(0, 80), body: String(body).slice(0, 200), silent: false }).show();
+// Notifications from the renderer. Clicking one shows the panel and jumps to the session.
+const liveNotifications = new Set(); // keep references, or a click can't reach a collected object
+ipcMain.on('notify', (_e, { title, body, target }) => {
+  if (config.loadConfig().notifications === false || !Notification.isSupported()) return;
+  title = String(title).slice(0, 80);
+  body = String(body).slice(0, 200);
+  console.log(`[agent-deck] notify: ${title} | ${body}`);
+  const n = new Notification({ title, body, silent: false });
+  liveNotifications.add(n);
+  const done = () => liveNotifications.delete(n);
+  n.on('close', done);
+  n.on('click', () => {
+    done();
+    showPanel();
+    if (target && win && !win.isDestroyed()) win.webContents.send('jump', target);
+  });
+  n.show();
 });
 
 ipcMain.on('quit', () => app.quit());

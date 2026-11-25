@@ -40,6 +40,10 @@ export const DEFAULTS = {
   shortcutVia: null,
   // Widget only: hidden with the tray icon / shortcut when it last closed.
   panelHidden: false,
+  // Widget only: desktop notifications (also in the tray menu).
+  notifications: true,
+  // Widget only: "Done, your turn" only after a session worked at least this long.
+  notifyAfterSeconds: 30,
 };
 
 export function ensureHome() {

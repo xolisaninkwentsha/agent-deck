@@ -93,6 +93,17 @@ The file isn't a documented Claude Code format (checked with 2.1.332). If it cha
 - `agent-deck toggle | show | hide` does the same from a terminal or script.
 - **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `agent-deck shortcut` once. It adds a GNOME custom shortcut ("Agent Deck" in Settings > Keyboard > Custom Shortcuts) that runs `agent-deck toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `agent-deck shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
 
+## Notifications
+
+The panel sends a desktop notification when:
+
+- a prompt is waiting in the panel (an approval, a plan or a question);
+- a session needs you **in the terminal** (no panel hold: watch-only sessions, approvals turned off, or a prompt handed back);
+- a session **finishes** after working for at least `notifyAfterSeconds` (30 s by default, so quick replies stay quiet);
+- a session stops with an error.
+
+At most one notification per session every 10 seconds. **Clicking** one shows the panel and jumps to the session (its tmux pane or VS Code window). Turn them off with **Notifications** in the tray menu (`notifications` in the config).
+
 ## Context meter
 
 Each card shows how full the session's context window is (`ctx 59%`; hover for the token count and model). It turns amber from `contextWarnPercent` (80% by default) and red from 95%.
@@ -137,6 +148,8 @@ agent-deck start | stop | restart        # the daemon
 | `approvalsInWidget` | true | the shield button |
 | `shortcut` | `Control+Alt+A` | shows/hides the panel |
 | `shortcutVia` | none | `gnome` after `agent-deck shortcut` (the panel then doesn't grab the key) |
+| `notifications` | true | desktop notifications (also in the tray menu) |
+| `notifyAfterSeconds` | 30 | "Done, your turn" only after this much work |
 | `contextWarnPercent` | 80 | context meter turns amber from here |
 | `contextWindows` | `{}` | context window per model-id prefix, if the built-in guess is wrong |
 

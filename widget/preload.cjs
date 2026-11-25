@@ -7,7 +7,8 @@ contextBridge.exposeInMainWorld('deck', {
   onApprovals: (fn) => ipcRenderer.on('approvals', (_e, enabled) => fn(enabled)), // changed from the tray
   resize: (height) => ipcRenderer.send('resize', height),
   setApprovals: (enabled) => ipcRenderer.send('set-approvals', enabled),
-  notify: (title, body) => ipcRenderer.send('notify', { title, body }),
+  notify: (title, body, target) => ipcRenderer.send('notify', { title, body, target }),
+  onJump: (fn) => ipcRenderer.on('jump', (_e, target) => fn(target)), // a notification was clicked
   quit: () => ipcRenderer.send('quit'),
   minimize: () => ipcRenderer.send('minimize'),
 });

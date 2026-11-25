@@ -24,6 +24,9 @@ const state = {
   seenPending: new Set(),
   drafts: {},          // pendingId -> { answers: {question: [labels]}, other: {question: text} }
   composing: false,    // an input method (IME) is composing text in an answer box
+  seen: new Map(),     // session key -> { status, since, pending } from the last snapshot
+  notified: new Map(), // session key -> time of its last notification
+  notifyAfter: 30,     // seconds of work before "Done, your turn" is worth a notification
 };
 
 // ---------- tiny DOM helper ----------
@@ -66,11 +69,12 @@ function connect(hub) {
       hub.sessions = msg.sessions || [];
       if (msg.host) hub.host = msg.host;
       notifyNewPending(hub);
+      notifyChanges(hub);
       render();
     }
   };
   ws.onclose = () => {
-    hub.connected = false; hub.sessions = [];
+    hub.connected = false; hub.sessions = []; hub.primed = false;
     render();
     if (!hub.removed) scheduleReconnect(hub);
   };
@@ -103,8 +107,35 @@ function notifyNewPending(hub) {
     if (!p || state.seenPending.has(p.id)) continue;
     state.seenPending.add(p.id);
     const what = p.kind === 'question' ? (p.questions?.[0]?.question || 'Claude has a question') : `${p.title}: ${p.detail || ''}`;
-    window.deck.notify(`${s.project}${hub.local ? '' : ' · ' + hub.name}`, what);
+    state.notified.set(s.key, Date.now());
+    window.deck.notify(`${s.project}${hub.local ? '' : ' · ' + hub.name}`, what, { key: s.key, hubUrl: hub.url });
   }
+}
+
+// Notify when a session finishes a real stretch of work, needs you in the terminal, or errors.
+// The first snapshot from a hub only records where things stand, so reconnecting is quiet.
+function notifyChanges(hub) {
+  const now = Date.now();
+  for (const s of hub.sessions) {
+    const prev = state.seen.get(s.key);
+    if (!prev || prev.status !== s.status) state.seen.set(s.key, { status: s.status, since: now, pending: Boolean(s.pending) });
+    else prev.pending = Boolean(s.pending);
+    if (!hub.primed || !prev || prev.status === s.status) continue;
+    let body = null;
+    if (prev.status === 'working' && (s.status === 'idle' || s.status === 'background')) {
+      if (now - prev.since >= state.notifyAfter * 1000) body = 'Done, your turn' + (s.lastMessage ? ': ' + s.lastMessage.slice(0, 140) : '');
+    } else if ((s.status === 'approval' || s.status === 'question') && !s.pending && !prev.pending) {
+      const what = String(s.step || '').replace(/^(question )?waiting in the terminal:?\s*/i, '').replace(/^needs approval in the terminal$/i, '');
+      body = (s.status === 'question' ? 'Question for you in the terminal' : 'Needs your approval in the terminal') + (what ? `: ${what}` : '');
+    } else if (s.status === 'error') {
+      body = s.step || 'Stopped with an error';
+    }
+    if (!body || now - (state.notified.get(s.key) || 0) < 10000) continue;
+    state.notified.set(s.key, now);
+    const name = `${s.project}${s.title ? ' · ' + s.title : ''}${hub.local ? '' : ' · ' + hub.name}`;
+    window.deck.notify(name, body, { key: s.key, hubUrl: hub.url });
+  }
+  hub.primed = true;
 }
 
 // ---------- actions ----------
@@ -328,9 +359,15 @@ document.addEventListener('keydown', (e) => {
   render();
 });
 window.deck.onApprovals((enabled) => setApprovals(enabled, false));
+// A notification was clicked: jump to that session (this machine's sessions only).
+window.deck.onJump((target) => {
+  const hub = state.hubs.find((x) => x.url === target?.hubUrl);
+  if (hub && hub.local) send(hub, { type: 'jump', key: target.key });
+});
 
 window.deck.config().then((cfg) => {
   state.approvals = cfg.approvalsInWidget;
+  state.notifyAfter = cfg.notifyAfterSeconds || 30;
   document.body.classList.add('os-' + cfg.platform);
   setHubs(cfg.hubs);
 });
