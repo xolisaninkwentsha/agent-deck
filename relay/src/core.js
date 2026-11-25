@@ -18,17 +18,30 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     return { type: 'status', linked: false, number: null, balanceMicroUsd: null, billing: config.billing, botNumber: config.botNumber };
   }
 
-  // Reserve credit, send, and release on failure. The caller persists the account afterwards.
-  async function sendCharged(account, payload, meta = {}) {
-    const price = priceFor(account.number, config);
+  // Every charged send goes through here. The reservation is persisted before the send and the
+  // release after a failure re-reads the account, so a concurrent event during the fetch is never
+  // overwritten. Callers must persist their own account changes BEFORE calling and never write a
+  // stale account copy afterwards.
+  async function sendAndSave(number, payload, meta = {}) {
+    const account = await getAccount(number);
+    if (!account) return { ok: false, reason: 'not-linked' };
+    const price = priceFor(number, config);
     const r = reserve(account, price, now(), config.hourlyCap);
+    await putAccount(account);
     if (!r.ok) return { ok: false, reason: r.reason };
-    const res = await sender.send(payload);
-    if (!res.ok) {
-      release(account, price);
+    let res;
+    try {
+      res = await sender.send(payload);
+    } catch {
+      res = { ok: false };
+    }
+    if (!res || !res.ok) {
+      const fresh = (await getAccount(number)) || account;
+      release(fresh, price);
+      await putAccount(fresh);
       return { ok: false, reason: 'send-failed' };
     }
-    await store.put('msg:' + res.id, { number: account.number, price, refunded: false, at: now(), ...meta });
+    await store.put('msg:' + res.id, { number, price, refunded: false, at: now(), ...meta });
     return { ok: true, id: res.id };
   }
 
@@ -114,8 +127,8 @@ export function createRelay({ store, sender, config, now = Date.now }) {
       routes.push({ keyHash, msg: statusMsg(null, null) });
     }
     account.machines = [];
-    await sendCharged(account, textMessage(account.number, 'Disconnected.'));
     await putAccount(account);
+    await sendAndSave(account.number, textMessage(account.number, 'Disconnected.'));
     return routes;
   }
 
@@ -141,9 +154,9 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     if (!account.machines.includes(rec.keyHash)) account.machines.push(rec.keyHash);
     await store.put('machine:' + rec.keyHash, m);
     await store.delete('code:' + code);
-    await sendCharged(account, textMessage(item.from, `Connected: ${m.machine}`));
     await putAccount(account);
-    return [{ keyHash: rec.keyHash, msg: statusMsg(m, account) }];
+    await sendAndSave(item.from, textMessage(item.from, `Connected: ${m.machine}`));
+    return [{ keyHash: rec.keyHash, msg: statusMsg(m, await getAccount(item.from)) }];
   }
 
   async function webhook(parsed) {
@@ -167,5 +180,5 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     return routes;
   }
 
-  return { hello, machineMessage, webhook, queue, statusMsg, sendCharged };
+  return { hello, machineMessage, webhook, queue, statusMsg, sendAndSave };
 }

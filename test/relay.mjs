@@ -359,15 +359,74 @@ async function main() {
     assert.equal(await store.get('outbox:kq'), undefined);
     check('queue holds messages for hello, dropping expired ones');
 
-    // failed send releases the charge
+    // failed send releases the charge (returned, and thrown)
     ({ store, sent, clock, relay } = setup());
-    const failing = createRelay({ store, sender: { send: async () => ({ ok: false, error: 'x' }) }, config, now: () => clock.t });
-    await failing.hello(KH, { machine: 'laptop', version: '1' });
-    r = await failing.machineMessage(KH, { type: 'link-start', number: '27821234567' });
-    routes = await failing.webhook(inbound('c1', '27821234567', r[0].code, clock.t));
-    assert.equal((await store.get('account:27821234567')).balance, config.trialMicroUsd);
-    assert.equal(routes[0].msg.linked, true);
-    check('a failed send releases the reservation');
+    for (const bad of [async () => ({ ok: false, error: 'x' }), async () => { throw new Error('boom'); }]) {
+      store = new MemoryStore();
+      const failing = createRelay({ store, sender: { send: bad }, config, now: () => clock.t });
+      await failing.hello(KH, { machine: 'laptop', version: '1' });
+      r = await failing.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+      routes = await failing.webhook(inbound('c1', '27821234567', r[0].code, clock.t));
+      const a = await store.get('account:27821234567');
+      assert.equal(a.balance, config.trialMicroUsd);
+      assert.equal(a.sent.length, 0);
+      assert.equal(routes[0].msg.linked, true);
+    }
+    check('a failed or throwing send restores the balance');
+
+    // race: another event changes the account during the send
+    store = new MemoryStore();
+    clock.t = 1700000000000;
+    let raced = 0;
+    const racing = {
+      send: async () => {
+        raced++;
+        if (raced === 2) { // during the confirmation of the second send
+          const a = await store.get('account:27821234567');
+          a.windowUntil = 4242;
+          a.balance -= price;
+          a.sent.push(clock.t);
+          await store.put('account:27821234567', a);
+        }
+        return { ok: true, id: 'r' + raced };
+      },
+    };
+    relay = createRelay({ store, sender: racing, config, now: () => clock.t });
+    await relay.hello(KH, { machine: 'laptop', version: '1' });
+    r = await relay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    await relay.webhook(inbound('d1', '27821234567', r[0].code, clock.t));
+    await store.put('account:27821234567', { ...(await store.get('account:27821234567')), machines: [KH] });
+    await relay.webhook(inbound('d2', '27821234567', 'stop', clock.t));
+    const ra = await store.get('account:27821234567');
+    assert.equal(ra.windowUntil, 4242);
+    assert.equal(ra.balance, config.trialMicroUsd - 3 * price);
+    check('a concurrent change during a send is not overwritten');
+
+    // money invariants: no second trial credit; billing off
+    ({ store, sent, clock, relay } = setup());
+    await relay.hello('k1', { machine: 'one', version: '1' });
+    await relay.hello('k2', { machine: 'two', version: '1' });
+    for (const [n, k] of [['d1', 'k1'], ['d2', 'k2']]) {
+      r = await relay.machineMessage(k, { type: 'link-start', number: '27821234567' });
+      await relay.webhook(inbound(n, '27821234567', r[0].code, clock.t));
+    }
+    let ma = await store.get('account:27821234567');
+    assert.deepEqual(ma.machines, ['k1', 'k2']);
+    assert.equal(ma.balance, config.trialMicroUsd - 2 * price);
+    await relay.webhook(inbound('d3', '27821234567', 'stop', clock.t));
+    r = await relay.machineMessage('k1', { type: 'link-start', number: '27821234567' });
+    await relay.webhook(inbound('d4', '27821234567', r[0].code, clock.t));
+    ma = await store.get('account:27821234567');
+    assert.equal(ma.balance, config.trialMicroUsd - 4 * price);
+    check('relinking never grants trial credit again');
+
+    const off = setup();
+    const offRelay = createRelay({ store: off.store, sender: { send: async () => ({ ok: true, id: 'o1' }) }, config: { ...config, billing: 'off' }, now: () => off.clock.t });
+    await offRelay.hello(KH, { machine: 'laptop', version: '1' });
+    r = await offRelay.machineMessage(KH, { type: 'link-start', number: '27821234567' });
+    await offRelay.webhook(inbound('e1', '27821234567', r[0].code, off.clock.t));
+    assert.equal((await off.store.get('account:27821234567')).balance, 0);
+    check("billing 'off' creates the account with balance 0");
   }
 
   console.log(`\n${passed} checks passed`);
