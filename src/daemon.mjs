@@ -79,24 +79,34 @@ const widgets = new Set();
 const phone = createPhone({
   home: HOME, machineName: NAME, log, onChange: broadcast, decide: phoneDecide, extendHold,
   relayUrl: process.env.AGENT_DECK_RELAY, version: VERSION,
+  // Tests only: the "unanswered for 2 minutes" rule, shortened.
+  awayAfterMs: Number(process.env.AGENT_DECK_PHONE_AWAY_AFTER_MS) || undefined,
 });
 const PHONE_HOLD_MS = 570000; // a PermissionRequest sent to the phone is held to createdAt + this
 const PRESENCE_MS = 60000; // a panel's presence report counts for this long
-// The last localAway() result: refreshed every tick and when a hook decides whether to hold.
+const AWAY_EVERY_MS = 10000; // the tick re-reads away (gdbus/ioreg) at most this often
+// The last localAway() result: refreshed by the tick (throttled) and when a hook decides whether
+// to hold. Unknown (no detection) until the first read.
 let localNow = { away: false, known: false, idleMs: null, locked: null };
+let localNowAt = 0;
+// For panels: true in use, false away, null when this machine can't tell. Panels send presence
+// to other machines only for a boolean, so a machine without detection never silences the phone.
+const localActive = (r = localNow) => (r.known ? !r.away : null);
 async function refreshAway() {
   const r = await localAway();
-  const flipped = r.away !== localNow.away;
+  const changed = localActive(r) !== localActive();
   localNow = r;
-  if (flipped) broadcast(); // localActive in local snapshots
+  localNowAt = Date.now();
+  if (changed) broadcast();
   return r;
 }
-// Away from this machine, and no panel says its own machine is in use (presence, last 60 s).
-const machineAway = (now = Date.now()) => localNow.away
-  && ![...widgets].some((w) => w.presence?.active === true && now - w.presence.at < PRESENCE_MS);
-// "Can the phone answer this prompt?" Only probes away (gdbus/ioreg) when the answer depends on it.
+// A panel says the machine it runs on is in use (presence, last 60 s).
+const presenceActive = (now = Date.now()) => [...widgets].some((w) => w.presence?.active === true && now - w.presence.at < PRESENCE_MS);
+// Away from this machine, and no panel says its own machine is in use.
+const machineAway = (now = Date.now()) => localNow.away && !presenceActive(now);
+// With the phone linked, enabled and connected (the caller checks): can it answer this prompt?
+// Only "only when I'm away" needs a fresh away read.
 async function phoneAnswers() {
-  if (!phone.isApprover(true)) return false; // not linked, enabled and connected
   if (phone.isApprover(false)) return true; // "send everything"
   await refreshAway();
   return phone.isApprover(machineAway());
@@ -205,8 +215,8 @@ function sendActivity(now = Date.now()) {
 
 // ---------- broadcasting ----------
 let broadcastTimer = null;
-// Pairing requests, the device list and the phone go only to panels on this machine (local),
-// never to another machine's panel.
+// Pairing requests, the device list and the phone's state go only to panels on this machine
+// (local), never to another machine's panel. A card's "sent to your phone" goes to every panel.
 function snapshot(local = false) {
   checkWake();
   const s = {
@@ -214,13 +224,14 @@ function snapshot(local = false) {
     sessions: [...sessions.values()].filter((x) => !x.dismissed).map((x) => publicView(x, { warnPercent: Number(cfg.contextWarnPercent) || 80 })),
     agents: [...agents.values()].map((a) => agentView(a)),
   };
+  const phoneView = phone.view();
+  // 'sent' or 'failed:<reason>' on the card. publicView returns a copy of the pending view.
+  for (const v of s.sessions) if (v.pending && Object.hasOwn(phoneView.sent, v.pending.id)) v.pending.phone = phoneView.sent[v.pending.id];
   if (local) {
     s.pairRequests = [...pairRequests.values()].map((r) => ({ id: r.id, name: r.device.name, dns: r.device.dns, login: r.device.login, ip: r.ip, port: r.port, shared: r.shared, at: r.at }));
     s.devices = [...devices.values()].map((d) => ({ ...d, connected: [...widgets].some((w) => w.deviceId === d.id) }));
-    s.phone = phone.view();
-    s.localActive = !localNow.away;
-    // 'sent' or 'failed:<reason>' on the card. publicView returns a copy of the pending view.
-    for (const v of s.sessions) if (v.pending && Object.hasOwn(s.phone.sent, v.pending.id)) v.pending.phone = s.phone.sent[v.pending.id];
+    s.phone = phoneView;
+    s.localActive = localActive();
   }
   return s;
 }
@@ -559,7 +570,7 @@ async function handleHook(body, res) {
     }
     // Someone has to be able to answer: a panel with approvals on, or the phone (while away).
     if (!skip && !approversConnected()) {
-      skip = !(await phoneAnswers());
+      skip = !phone.isApprover(true) || !(await phoneAnswers()); // no phone: no await, as before
       if (!skip && res.destroyed) { broadcast(); return null; } // Claude Code dropped the hook meanwhile
     }
     if (!skip) {
@@ -822,27 +833,36 @@ setInterval(() => {
   }
   if (changed) broadcast();
   sendActivity(now);
-  phoneTick().catch(() => log('phone tick failed'));
+  phoneTick().catch((e) => log('phone tick failed: ' + (e?.message || e)));
 }, TICK_MS).unref();
 
-// Every tick: refresh away, offer held prompts to the phone, and when nobody can answer any more
-// (no panel approving, and the phone doesn't count: back at the desk, or the link dropped), hand
-// PreToolUse questions back to the terminal, which doesn't show them while they're held.
+// Every tick: refresh away (at most every 10 s), offer held prompts to the phone, and hand
+// PreToolUse questions back to the terminal (which doesn't show them while they're held) when no
+// panel is approving and either the phone doesn't count (back at the desk, or the link dropped)
+// or sending that question to the phone failed.
 // PermissionRequest holds stay: the terminal shows them anyway, and one may be on the phone.
 let phoneTickBusy = false;
 async function phoneTick() {
   if (phoneTickBusy) return; // a slow away probe: skip this tick
   phoneTickBusy = true;
   try {
-    await refreshAway();
-    const away = machineAway();
+    if (Date.now() - localNowAt >= AWAY_EVERY_MS) await refreshAway();
+    const active = presenceActive();
+    const away = localNow.away && !active;
     phone.consider([...pendings].map(([id, p]) => ({
       id, hookEvent: p.hookEvent, toolName: p.toolName, toolInput: p.toolInput,
       project: sessions.get(p.key)?.project || '', questions: p.view.questions || null,
       createdAt: p.createdAt, expiresAt: p.expiresAt,
-    })), away);
-    if (!approversConnected() && !phone.isApprover(away)) {
-      for (const p of [...pendings.values()]) if (p.hookEvent === 'PreToolUse') p.finish(null, 'no approvers');
+    })), away, active);
+    if (!approversConnected()) {
+      const phoneCounts = phone.isApprover(away);
+      const { sent } = phone.view();
+      for (const [id, p] of [...pendings]) {
+        if (p.hookEvent !== 'PreToolUse') continue;
+        const failed = Object.hasOwn(sent, id) && String(sent[id]).startsWith('failed:');
+        if (!phoneCounts) p.finish(null, 'no approvers');
+        else if (failed) p.finish(null, 'not sent to the phone');
+      }
     }
   } finally {
     phoneTickBusy = false;

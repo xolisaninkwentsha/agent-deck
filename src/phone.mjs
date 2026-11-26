@@ -54,7 +54,7 @@ function cleanDecision(d) {
 export function createPhone({
   home, machineName, log = () => {}, onChange = () => {}, decide, extendHold,
   relayUrl = process.env.AGENT_DECK_RELAY, WebSocketImpl = WebSocket, now = Date.now, version = '0.1.0',
-  handshakeTimeout = 10000,
+  handshakeTimeout = 10000, awayAfterMs = AWAY_AFTER_MS,
 }) {
   const file = path.join(home, 'phone.json');
   let state = null; // { key, relay, enabled, mode, lastStatus }
@@ -269,14 +269,17 @@ export function createPhone({
     state && linkedNow() && state.enabled && connected && (state.mode === 'everything' || away),
   );
 
-  function consider(list, away) {
+  // presenceActive: a panel says the machine it runs on is in use, so the user is at a computer
+  // and the 2-minute rule doesn't apply. "Send everything" still sends: the user chose it.
+  function consider(list, away, presenceActive = false) {
     if (!connected || !linkedNow() || !state.enabled) return;
     const t = now();
     for (const p of list) {
       if (p.id in sent || inflight.has(p.id)) continue;
       if (p.expiresAt - t < MIN_LEFT_MS) continue;
       const permission = p.hookEvent === 'PermissionRequest';
-      if (!(state.mode === 'everything' || away || (permission && t - p.createdAt >= AWAY_AFTER_MS))) continue;
+      const unanswered = permission && !presenceActive && t - p.createdAt >= awayAfterMs;
+      if (!(state.mode === 'everything' || away || unanswered)) continue;
       let prompt;
       try {
         prompt = phoneSummary({ toolName: p.toolName, toolInput: p.toolInput, project: p.project, questions: p.questions });

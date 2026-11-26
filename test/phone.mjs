@@ -132,25 +132,27 @@ async function linkRelay(key) {
 }
 
 // A daemon in a throwaway AGENT_DECK_HOME, linked to `relay` through a pre-written phone.json
-// (its key is the one the relay accepts; enabled, "only when I'm away").
+// (its key is the one the relay accepts; enabled, "only when I'm away"). No relay: no phone at all.
 const daemons = [];
-async function startDaemon({ name, key, relay, bind, token }) {
+async function startDaemon({ name, key, relay, bind, token, env = {} }) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ad-phone-daemon-'));
   const port = await freePort(bind ? ['127.0.0.1', bind] : ['127.0.0.1']);
   const claude = path.join(home, 'claude'); // a fake ~/.claude: none of this machine's real sessions
   fs.mkdirSync(path.join(claude, 'sessions'), { recursive: true });
   fs.writeFileSync(path.join(home, 'crontab'), '');
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ port, name, otlpPort: 0, ...(bind ? { bind, token } : {}) }));
-  fs.writeFileSync(path.join(home, 'phone.json'), JSON.stringify({ key, relay: relay.url, enabled: true, mode: 'away', lastStatus: null }), { mode: 0o600 });
+  if (relay) fs.writeFileSync(path.join(home, 'phone.json'), JSON.stringify({ key, relay: relay.url, enabled: true, mode: 'away', lastStatus: null }), { mode: 0o600 });
   const awayFile = path.join(home, 'away.json');
-  const d = { home, port, name, logFile: path.join(home, 'daemon.log') };
+  const d = { home, port, name, awayFile, logFile: path.join(home, 'daemon.log') };
   d.away = (idleMs) => fs.writeFileSync(awayFile, JSON.stringify({ idleMs, locked: false }));
   d.away(1000);
   d.env = {
     ...process.env, AGENT_DECK_HOME: home, AGENT_DECK_PORT: String(port), CLAUDE_CONFIG_DIR: claude,
-    AGENT_DECK_CRONTAB: path.join(home, 'crontab'), AGENT_DECK_RELAY: relay.url, AGENT_DECK_AWAY_FILE: awayFile,
+    AGENT_DECK_CRONTAB: path.join(home, 'crontab'), AGENT_DECK_AWAY_FILE: awayFile, ...env,
   };
-  for (const k of ['AGENT_DECK_DISABLE', 'AGENT_DECK_BIND', 'AGENT_DECK_VERBOSE']) delete d.env[k];
+  if (relay) d.env.AGENT_DECK_RELAY = relay.url;
+  else delete d.env.AGENT_DECK_RELAY;
+  for (const k of ['AGENT_DECK_DISABLE', 'AGENT_DECK_BIND', 'AGENT_DECK_VERBOSE', 'AGENT_DECK_EVENT_LOG']) delete d.env[k];
   d.child = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: d.env, stdio: 'ignore' });
   const exited = new Promise((r) => d.child.once('exit', r));
   const running = () => d.child.exitCode === null && d.child.signalCode === null;
@@ -209,7 +211,8 @@ async function daemonChecks() {
   cleanups.push(() => { for (const k of hookKids) k.kill(); });
   const key = crypto.randomBytes(32).toString('base64url');
   const relay = await linkRelay(key);
-  const d = await startDaemon({ name: 'phone-box', key, relay });
+  // The 2-minute rule is 1 s here, so the presence check below needn't wait two minutes.
+  const d = await startDaemon({ name: 'phone-box', key, relay, env: { AGENT_DECK_PHONE_AWAY_AFTER_MS: '1000' } });
   const url = `ws://127.0.0.1:${d.port}/ws`;
 
   // Wait for the link through a local panel, then close it: the first checks run with no panel.
@@ -219,7 +222,7 @@ async function daemonChecks() {
   await until(() => w.snap?.phone?.linked && w.snap.phone.connected && w.snap.phone.enabled, 'the daemon linked to the fake relay', 8000);
   assert.equal(relay.of('hello').length, 1);
   assert.equal(relay.refused, 0);
-  assert.equal(typeof w.snap.localActive, 'boolean');
+  await until(() => w.snap?.localActive === true, 'the first away read (at the desk)', 6000); // null until then
   await w.close();
 
   // no panel, away
@@ -356,14 +359,68 @@ async function daemonChecks() {
   await until(() => relay.of('prompt').at(-1)?.prompt?.questions?.[0]?.question === 'Deploy to which stage?', 'the PreToolUse question on the relay', 8000);
   const m8 = relay.of('prompt').at(-1);
   d.away(1000);
-  assert.equal((await within(h8, 6000, 'the question handed back to the terminal')).out, '');
+  // The tick re-reads away at most every 10 s, then hands the question back on that tick.
+  assert.equal((await within(h8, 15000, 'the question handed back to the terminal')).out, '');
   await until(() => relay.of('prompt-closed', m8.pendingId).length === 1, 'prompt-closed for the released question');
   assert.equal(relay.of('prompt-closed', m8.pendingId)[0].why, 'timeout');
-  check('back at the desk: a PreToolUse question held for the phone is handed to the terminal within a tick');
+  check('back at the desk: a PreToolUse question held for the phone is handed to the terminal on the next away check');
+
+  // At the desk, with a panel approving: the 2-minute rule (1 s here) sends a PermissionRequest to
+  // the phone, but not while another machine's panel reports it's in use.
+  const ap = panel(url);
+  await ap.opened;
+  ap.send({ type: 'hello', approvals: true });
+  p2.send({ type: 'presence', active: true });
+  await sleep(200);
+  sentSoFar = relay.of('prompt').length;
+  const h9 = ask(d, { tool_input: { command: 'terraform apply' } });
+  const pend9 = () => w2.snap?.sessions?.find((s) => s.pending?.detail === 'terraform apply')?.pending;
+  await until(() => pend9(), 'held for the approving panel');
+  await sleep(5000); // well past 1 s, two ticks or more
+  assert.equal(relay.of('prompt').length, sentSoFar, 'not sent while another panel reports active');
+  p2.send({ type: 'presence', active: false });
+  await until(() => relay.of('prompt').length === sentSoFar + 1, 'sent by the 2-minute rule once nobody reports active', 8000);
+  assert.equal(relay.of('prompt').at(-1).pendingId, pend9().id);
+  ap.send({ type: 'decide', pendingId: pend9().id, decision: { behavior: 'allow' } });
+  assert.equal(decisionOf(await within(h9, 5000, 'the panel\'s answer')).behavior, 'allow');
+  await ap.close();
+  check('presence: no 2-minute rule while another panel reports active (sent once it stops)');
+
+  // A failed send doesn't leave a PreToolUse question hidden from the terminal, even while the
+  // phone still counts as an approver.
+  d.away(400000);
+  const failQ = [{ question: 'Which region?', header: 'Region', multiSelect: false, options: [{ label: 'af-south-1' }, { label: 'eu-west-1' }] }];
+  const h10 = ask(d, { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', permission_mode: 'bypassPermissions', tool_use_id: 'q-fail', tool_input: { questions: failQ } });
+  await until(() => relay.of('prompt').at(-1)?.prompt?.questions?.[0]?.question === 'Which region?', 'the question on the relay', 8000);
+  const m10 = relay.of('prompt').at(-1);
+  relay.send({ type: 'prompt-failed', pendingId: m10.pendingId, reason: 'no-credit' });
+  assert.equal((await within(h10, 6000, 'the question handed back after a failed send')).out, '');
+  await until(() => relay.of('prompt-closed', m10.pendingId).length === 1, 'prompt-closed for the failed question');
+  assert.equal(relay.of('prompt-closed', m10.pendingId)[0].why, 'timeout');
+  check('a failed send hands a PreToolUse question back to the terminal on the next tick');
 
   const log = fs.readFileSync(d.logFile, 'utf8');
-  for (const text of [secret, 'curl', 'npm publish', 'git push', '+27']) assert.ok(!log.includes(text), `daemon log has ${text}`);
-  check('daemon log carries no prompt text or number');
+  for (const text of [secret, 'curl', 'npm publish', 'git push', 'terraform', 'Which region']) assert.ok(!log.includes(text), `daemon log has ${text}`);
+  check('daemon log carries no prompt text');
+
+  // No relay configured: a held PreToolUse question goes back to the terminal on the next tick
+  // once the last panel turns approvals off; away detection that can't tell gives localActive null.
+  const dn = await startDaemon({ name: 'phone-none' });
+  const np = panel(`ws://127.0.0.1:${dn.port}/ws`);
+  await np.opened;
+  np.send({ type: 'hello', approvals: true });
+  await until(() => np.snap?.localActive === true, 'at the desk in the snapshot', 6000);
+  assert.equal(np.snap.phone.relay, '');
+  assert.equal(np.snap.phone.connected, false);
+  const noRelayQ = [{ question: 'Squash the commits?', header: 'Squash', multiSelect: false, options: [{ label: 'Yes' }, { label: 'No' }] }];
+  const h11 = hook(dn.env, 'decide', { session_id: 'none-sess', cwd: '/work/voice-api', hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', permission_mode: 'bypassPermissions', tool_use_id: 'q-none', tool_input: { questions: noRelayQ } });
+  await until(() => np.snap?.sessions?.some((s) => s.pending?.kind === 'question'), 'the question held for the panel');
+  np.send({ type: 'approvals', enabled: false });
+  assert.equal((await within(h11, 3500, 'the question handed back within a tick')).out, '');
+  check('no relay: approvals turned off hands a held PreToolUse question back within a tick');
+  fs.rmSync(dn.awayFile);
+  await until(() => np.snap?.localActive === null, 'localActive null once away is unknown', 15000);
+  check('away unknown (no away file): the local snapshot has localActive null');
 
   // local only
   const lan = Object.values(os.networkInterfaces()).flat().find((a) => a && a.family === 'IPv4' && !a.internal)?.address;
@@ -382,6 +439,20 @@ async function daemonChecks() {
     await until(() => local.snap?.phone?.linked && local.snap.phone.connected, 'the LAN daemon linked', 8000);
     await until(() => remote.snap, 'a snapshot on the remote panel');
     assert.ok(!('phone' in remote.snap) && !('localActive' in remote.snap), 'phone state only goes to this machine\'s panels');
+
+    // "Sent to your phone" shows on this machine's cards in another machine's panel too.
+    d2.away(400000);
+    const h12 = ask(d2, { tool_input: { command: 'docker system prune' } });
+    await until(() => relay2.of('prompt').length === 1, 'the LAN daemon\'s prompt on its relay', 8000);
+    const m12 = relay2.of('prompt')[0];
+    relay2.send({ type: 'prompt-sent', pendingId: m12.pendingId });
+    const remotePending = () => remote.snap?.sessions?.find((s) => s.pending?.id === m12.pendingId)?.pending;
+    await until(() => remotePending()?.phone === 'sent', 'sent shown on the remote panel\'s card');
+    assert.ok(!('phone' in remote.snap) && !('localActive' in remote.snap), 'still no phone state on the remote panel');
+    relay2.send({ type: 'decide', pendingId: m12.pendingId, decision: { behavior: 'allow' } });
+    assert.equal(decisionOf(await within(h12, 5000, 'the LAN daemon\'s hook answered')).behavior, 'allow');
+    check('pending.phone reaches remote panels; the phone view and localActive stay local');
+
     remote.send({ type: 'phone-link', number: '+27820000000' });
     remote.send({ type: 'phone-settings', mode: 'everything', enabled: false });
     remote.send({ type: 'phone-unlink' });
@@ -392,7 +463,12 @@ async function daemonChecks() {
     assert.equal(local.snap.phone.enabled, true);
     local.send({ type: 'phone-link', number: '+27820000000' });
     await until(() => relay2.of('link-start').length === 1, 'link-start from the local panel');
+    assert.equal(relay2.of('link-start')[0].number, '+27820000000');
     check('local only: phone-* from a remote panel are ignored; the local panel\'s phone-link reaches the relay');
+    await sleep(200);
+    const log2 = fs.readFileSync(d2.logFile, 'utf8');
+    for (const text of ['+27', '820000000']) assert.ok(!log2.includes(text), `daemon log has ${text}`);
+    check('daemon log carries no phone number after a link');
   }
 }
 
@@ -584,6 +660,24 @@ async function main() {
     await until(() => t.phone.view().sent.x2 === 'sent' && t.phone.view().sent.x1 === 'sent', 'both sent');
     assert.deepEqual(t.extended, ['x1']);
     check('extend: extendHold once for PermissionRequest, not for PreToolUse');
+  }
+
+  // presence: another machine's panel in use means no 2-minute rule; "everything" still sends
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay);
+    await linked(t, relay);
+    const pr = pend({ id: 'w1', hookEvent: 'PermissionRequest', expiresAt: 1_000_000 + 300000 });
+    t.now += 120000;
+    t.phone.consider([pr], false, true);
+    await sleep(50);
+    assert.equal(relay.of('prompt').length, 0, 'not sent while a panel reports active');
+    t.phone.consider([pr], false, false);
+    await until(() => relay.of('prompt').some((x) => x.pendingId === 'w1'), 'sent by the 2-minute rule once nobody is active');
+    t.phone.panelMessage({ type: 'phone-settings', mode: 'everything' });
+    t.phone.consider([pend({ id: 'w2', createdAt: t.now, expiresAt: t.now + 90000 })], false, true);
+    await until(() => relay.of('prompt').some((x) => x.pendingId === 'w2'), '"everything" sends whatever the presence');
+    check('presence: no 2-minute rule while a panel reports active; "everything" still sends');
   }
 
   // decide
