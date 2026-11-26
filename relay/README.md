@@ -6,11 +6,11 @@ The relay lets Agent Deck send approvals and questions to your phone over WhatsA
 - WhatsApp (Meta's Cloud API) calls `https://<worker host>/whatsapp/webhook` when you message the bot or tap a button;
 - `https://<worker host>/health` answers `ok`.
 
-Agent Deck uses a hosted relay by default. This guide is for running your own: your own Cloudflare account, your own Meta app and number, and billing off.
+This guide is for running your own relay: your own Cloudflare account, your own Meta app and number, and billing off. Agent Deck has no relay address set until you enter one in Settings, and it only connects to a relay while you're linking a number or a number is linked.
 
 ## What you need
 
-- Node.js 22 or later.
+- Node.js 22.12.0 or later (the pinned Wrangler, 4.168.0, needs it).
 - A Cloudflare account. The Workers Free plan includes SQLite-backed Durable Objects, which is all the relay uses.
 - A Meta developer account, and a phone with WhatsApp to approve from.
 
@@ -43,7 +43,7 @@ Required (the webhook and `/link` answer "relay is not configured" until all six
 | Name | What it is |
 | --- | --- |
 | `WA_TOKEN` | A Meta access token that can send WhatsApp messages (see step 2). |
-| `WA_PHONE_NUMBER_ID` | The bot number's Phone number ID, from WhatsApp → API Setup. This is an id, not the phone number. |
+| `WA_PHONE_NUMBER_ID` | The bot number's Phone number ID, from WhatsApp → API Setup. This is an id, not the phone number. Webhook calls for any other number on the same Meta app are ignored. |
 | `WA_APP_SECRET` | Your Meta app's App secret (App settings → Basic). The relay uses it to check that webhook calls really come from Meta. |
 | `WA_VERIFY_TOKEN` | Any long random string you make up, for example the output of `openssl rand -hex 32`. You give the same string to Meta in step 3. |
 | `BOT_NUMBER` | The bot's WhatsApp number with its country code, for example `+1 555 010 0000`. Agent Deck shows it and builds the `wa.me` link from it. |
@@ -58,10 +58,10 @@ Optional (leave these unset on your own relay):
 | `TEMPLATE_NAME` | `agent_deck_needs_you` | The message template used outside WhatsApp's 24-hour window (step 4). |
 | `TEMPLATE_LANG` | `en` | That template's language code. |
 | `TRIAL_MICRO_USD` | `0` | Only with billing on: the starting credit for a new number, in millionths of a US dollar. |
-| `RATES_JSON` | `{"default":0}` | Only with billing on: the cost of one message in micro-USD, by country-code prefix, for example `{"default":10000,"44":9000}`. The longest matching prefix wins. |
+| `RATES_JSON` | `{"default":0}` | Only with billing on: the cost of one message in micro-USD, by country-code prefix, for example `{"default":10000,"44":9000}`. The longest matching prefix wins. With `BILLING` set to `trial` or `on`, `default` must be above 0. |
 | `MARKUP_PERCENT` | `0` | Only with billing on: added on top of `RATES_JSON`. |
 
-A bad value (an unknown `BILLING`, a negative number, `RATES_JSON` without a `default`) stops the webhook and `/link` with an error that names the variable. `npx wrangler tail` shows it.
+A bad value (an unknown `BILLING`, a negative number, `RATES_JSON` without a `default`, or a `default` of 0 with billing `trial` or `on`) stops the webhook and `/link` with an error that names the variable. `npx wrangler tail` shows it.
 
 ## 2. Create the Meta app and number
 

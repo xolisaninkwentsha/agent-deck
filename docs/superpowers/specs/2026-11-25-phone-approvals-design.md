@@ -151,7 +151,7 @@ Text starts from what the panel already shows (`describeApproval` in `src/state.
   - **MCP and other tools:** the tool name and the names of the fields it's filling in, never their values (`describeApproval` currently uses the raw JSON for these).
   - **Questions and plans:** sent as written, since Claude wrote them for the user. Plans are cut to their start.
   - The panel itself is unchanged and keeps showing the full text.
-- **Permission:** "<project> · Claude wants to <title>", then the masked detail (at most 300 characters). Buttons: **Allow** / **Deny**.
+- **Permission:** "<project> · Claude wants to <title>", then the masked detail (at most 300 characters; a shell command at most 900, ending "… (+N more characters: check the computer)" when cut). Buttons: **Allow** / **Deny**.
 - **Plan** (ExitPlanMode): the start of the plan (at most about 900 characters). Buttons: **Approve** / **Keep planning**.
 - **Question:**
   - single choice, 3 options or fewer: reply buttons;
