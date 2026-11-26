@@ -49,7 +49,10 @@ let approvals = true;     // mirrors the shield button and the tray checkbox
 let shortcutKey = null;   // accelerator registered with globalShortcut, if any
 let placed = false;       // true once our own first placement is over; later moves are the user's
 
-if (!relaunching && !app.requestSingleInstanceLock()) { app.quit(); }
+// One panel per machine. A second copy only makes the first show itself ('second-instance')
+// and quits without starting anything, above all not a control socket in place of the first's.
+const secondCopy = !relaunching && !app.requestSingleInstanceLock();
+if (secondCopy) app.quit();
 app.on('second-instance', () => showPanel());
 
 // ---------- show / hide (tray, shortcut, `modisa toggle`) ----------
@@ -423,5 +426,5 @@ ipcMain.on('open-link', (_e, url) => {
 ipcMain.on('quit', () => app.quit());
 ipcMain.on('minimize', () => win && win.minimize());
 
-if (!relaunching) app.whenReady().then(createWindow);
+if (!relaunching && !secondCopy) app.whenReady().then(createWindow);
 app.on('window-all-closed', () => app.quit());

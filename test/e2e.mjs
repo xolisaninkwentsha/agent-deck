@@ -2,6 +2,7 @@
 // Runs in a throwaway MODISA_HOME on a spare port.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -871,6 +872,22 @@ async function main() {
   cli('remove-hub', 'ubuntu'); cli('remove-hub', 'mac');
   assert.deepEqual(hubsNow(), []);
   ok('other machines: addresses normalised (bare IP → ws://IP:47615), bad names, schemes, paths and tokens refused');
+
+  // 9t. "modisa widget" with a panel already open shows that one instead of starting a second copy.
+  const heard = [];
+  const fakePanel = net.createServer((c) => { c.setEncoding('utf8'); c.on('data', (d) => { heard.push(d.trim()); c.end('shown\n'); }); });
+  await new Promise((r) => fakePanel.listen(path.join(HOME, 'panel.sock'), r));
+  const widgetRun = await new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(ROOT, 'bin', 'modisa.mjs'), 'widget'], { env });
+    let out = '';
+    p.stdout.on('data', (c) => { out += c; });
+    p.on('close', (status) => resolve({ status, out }));
+  });
+  await new Promise((r) => fakePanel.close(r));
+  assert.equal(widgetRun.status, 0);
+  assert.equal(widgetRun.out.trim(), 'The panel is already open.');
+  assert.deepEqual(heard, ['show']);
+  ok('"modisa widget" with a panel already open brings it forward instead of starting another');
 
   // 10. Background tasks and subagents.
   await hook('observe', base('PostToolUse', { tool_name: 'Bash', tool_input: { command: 'npm run dev', run_in_background: true, description: 'Dev server' }, tool_response: { backgroundTaskId: 'bg1' }, tool_use_id: 't9' }));

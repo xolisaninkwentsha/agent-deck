@@ -211,6 +211,8 @@ const commands = {
 
   async widget() {
     await ensureDaemon();
+    // Already open: bring it forward. A second copy would only quit (one panel per machine).
+    if (await tellPanel('show') !== null) { console.log('The panel is already open.'); return; }
     let electron;
     try { electron = require('electron'); } catch {
       console.log('Electron is not installed. Run "npm install" in ' + ROOT);
