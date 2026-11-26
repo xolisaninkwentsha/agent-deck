@@ -828,7 +828,7 @@ async function main() {
     }
 
     {
-      const { clock, relay, ask, tap } = await setup();
+      const { store, clock, relay, ask, tap } = await setup();
       const { ref } = await ask('kh1', 'p1', approval);
       const [route] = await tap('t1', `${ref}:allow`);
       await relay.queue(route.keyHash, route.msg, route.expiresAt);
@@ -840,7 +840,16 @@ async function main() {
       await relay.queue(late.keyHash, late.msg, late.expiresAt);
       clock.t += 60001;
       assert.deepEqual((await relay.hello('kh1', { machine: 'kh1', version: '1' })).slice(1), []);
-      check('decide is queued for an offline machine');
+      // A queued decide carries the balance as it is at hello, not when it was queued.
+      const { ref: ref3 } = await ask('kh1', 'p3', approval);
+      const [raw] = await relay.webhook({ inbound: [{ id: 't3', from: N, ts: clock.t, buttonId: `${ref3}:allow` }], statuses: [] });
+      await relay.queue(raw.keyHash, raw.msg, raw.expiresAt);
+      await store.put('account:' + N, { ...(await store.get('account:' + N)), balance: raw.msg.balanceMicroUsd - 777 });
+      const [st, dq] = await relay.hello('kh1', { machine: 'kh1', version: '1' });
+      assert.equal(dq.type, 'decide');
+      assert.equal(dq.balanceMicroUsd, raw.msg.balanceMicroUsd - 777);
+      assert.equal(st.balanceMicroUsd, dq.balanceMicroUsd);
+      check('decide is queued for an offline machine, and carries the balance as of its delivery');
     }
 
     {

@@ -100,7 +100,13 @@ export function createRelay({ store, sender, config, now = Date.now, onError = (
     const out = [statusMsg(m, account)];
     const box = (await store.get('outbox:' + keyHash)) || [];
     const t = now();
-    for (const e of box) if (e.expiresAt === null || e.expiresAt === undefined || e.expiresAt > t) out.push(e.msg);
+    // A queued message's balance is from when it was queued; the daemon applies it after the
+    // status above, so it gets today's figure instead.
+    const balance = account ? account.balance : null;
+    for (const e of box) {
+      if (!(e.expiresAt === null || e.expiresAt === undefined || e.expiresAt > t)) continue;
+      out.push(e.msg && 'balanceMicroUsd' in e.msg ? { ...e.msg, balanceMicroUsd: balance } : e.msg);
+    }
     if (box.length) await store.delete('outbox:' + keyHash);
     return out;
   }

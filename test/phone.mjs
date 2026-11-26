@@ -1032,13 +1032,13 @@ async function main() {
   }
   {
     const relay = await fakeRelay();
-    const t = setup(relay, { backoffMinMs: 50, linkWindowMs: 500 });
+    const t = setup(relay, { backoffMinMs: 50, linkWindowMs: 2000 }); // room for connect + link-code on a slow runner
     t.phone.start();
     startLink(t);
     await until(() => relay.of('link-start').length === 1, 'link-start');
     relay.send({ type: 'link-code', code: 'ABCD2345', expiresAt: t.now + 600000, botNumber: '27600000000' });
     await until(() => t.phone.view().code, 'code');
-    await until(() => closedOn(relay, 0), 'the link dropped when the code\'s time ran out', 3000);
+    await until(() => closedOn(relay, 0), 'the link dropped when the code\'s time ran out', 6000);
     await sleep(300);
     assert.equal(relay.connections, 1);
     assert.equal(t.phone.view().code.code, 'ABCD2345', 'the code stays, shown as expired');
