@@ -99,6 +99,18 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
 
 "Always" applies the rule Claude Code suggests (for example "always allow `npm run test`"), the same as choosing "Yes, don't ask again" in the terminal.
 
+## Phone approvals (WhatsApp)
+
+When you're away from your computer, Agent Deck can send an approval or a question to your phone on WhatsApp. You answer there with a tap, and Claude carries on.
+
+- **Connect it:** open the panel's Settings, find "Phone (WhatsApp)", enter your number with the country code (for example +27 82 123 4567) and press **Connect**. The panel shows a short code. Send that code to the Agent Deck bot on WhatsApp (**Open WhatsApp** does it for you) within 10 minutes. The panel then shows "Connected".
+- **When it sends:** by default only when you're away: the screen is locked, there has been no keyboard or mouse input for 5 minutes, or a permission prompt has sat unanswered for 2 minutes. If another of your panels is in use, this machine doesn't count as away. Choose **Send everything** in Settings to get every prompt on your phone.
+- **On the card:** a prompt that went to your phone says "Sent to your phone". If it couldn't be sent (no credit, the hourly limit, the phone not connected), the card says why, and you can still answer in the panel or the terminal.
+- **Secrets are masked:** what goes to WhatsApp has tokens, keys and passwords hidden, and long commands and plans are shortened.
+- **"Always" is never offered on the phone.** You can only allow, deny or answer the prompt you were sent, while it's still open. To always allow something, use the panel or the terminal.
+- **Turn it off:** the switch "Phone approvals on this machine" stops sending from this machine; **Disconnect** unlinks the number.
+- **The relay:** the phone link goes through a relay, a small service that talks to WhatsApp for you. You can use the hosted relay if one is provided for your copy of Agent Deck, or run your own: see [`relay/README.md`](relay/README.md), then paste its address under "Relay address" in Settings (it starts with `wss://`).
+
 ## Service agents
 
 Long-running agents that aren't Claude Code sessions (scheduled jobs, chat bots) get their own **Agents** section below the sessions. Each card shows:

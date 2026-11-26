@@ -355,3 +355,12 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .mini.square { border-radius: 2px; }
 .meta .status, .meta .ag-wait { white-space: nowrap; flex: none; }
 .ag-last { min-width: 0; }
+
+/* phone approvals */
+.set-error.pad { padding: 2px 6px 4px; margin-top: 0; }
+.phone-code { flex-direction: column; align-items: stretch; gap: 4px; }
+.phone-code .code { font-family: var(--mono); font-size: 24px; font-weight: 600; letter-spacing: 4px; color: var(--text); user-select: text; text-align: center; padding: 4px 0; }
+.phone-code .set-hint { text-align: center; }
+.phone-code .btns { justify-content: center; margin-top: 4px; }
+.phone-note { color: var(--muted); font-size: 10.5px; margin-top: 5px; }
+.phone-note.bad { color: var(--approval); }

@@ -48,6 +48,7 @@ const state = {
   seenPairs: new Set(),  // pairing requests already notified
   pairBack: {},          // request id -> "also show its sessions here"
   fullDetail: new Set(), // pending ids whose plan or command is shown in full
+  phoneDraft: { number: '', lastNumber: '', relay: null }, // Settings → Phone: what you typed (relay null = not edited yet)
 };
 
 // ---------- settings ----------
@@ -92,7 +93,100 @@ function settingsView() {
     row('Theme', null, select(c.theme || 'system', [['system', 'System'], ['dark', 'Dark'], ['light', 'Light']], (v) => saveSetting({ theme: v }))),
     row('Show/hide shortcut', linuxNoGnome ? 'Run "agent-deck shortcut" so it works in every app' : null,
       h('span', { class: 'set-value', text: c.shortcut ? prettyKey(c.shortcut) + (c.shortcutVia === 'gnome' ? ' (GNOME)' : '') : 'none' })),
+    ...phoneView(row),
     ...machinesView(row));
+}
+
+// ---------- phone approvals (WhatsApp) ----------
+// Uses this machine's own daemon only: the link, its code and its settings live there.
+// What you type stays in state.phoneDraft, so a settings rebuild doesn't lose it.
+const PHONE_ERRORS = {
+  'bad-number': 'Include the country code, e.g. +27 82 123 4567',
+  'rate-limited': 'Too many tries; wait an hour',
+  'relay-unreachable': 'Can\'t reach the relay',
+  'bad-relay': 'That relay address isn\'t valid (use wss://)',
+};
+const PHONE_FAIL = {
+  'no-credit': 'out of phone credit', 'rate-limited': 'hourly limit reached',
+  'not-linked': 'phone not connected', 'send-failed': 'WhatsApp refused it',
+};
+// "sent" is left out: it changes with every prompt and would rebuild Settings each time.
+const phoneSig = (ph) => { if (!ph) return ''; const { sent, ...rest } = ph; return JSON.stringify(rest); };
+const codeLeftText = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const phoneSend = (msg) => { const hub = localHub(); if (hub) send(hub, msg); };
+const money = (micro) => '$' + (micro / 1e6).toFixed(2);
+
+function phoneView(row) {
+  const ph = localHub()?.phone;
+  if (!ph) return []; // an older daemon
+  const d = state.phoneDraft;
+  if (d.relay === null) d.relay = ph.relay || '';
+  const noRelay = ph.relay === '' && ph.error !== 'bad-relay';
+  const toggle = (on, onChange) => h('button', { class: 'switch' + (on ? ' on' : ''), role: 'switch', 'aria-checked': String(on), onclick: () => onChange(!on) }, h('span', { class: 'knob' }));
+  const connectNow = () => {
+    const number = d.number.trim();
+    if (!number) return;
+    d.lastNumber = number;
+    phoneSend({ type: 'phone-link', number });
+  };
+  const out = [h('div', { class: 'section-head', text: 'Phone (WhatsApp)' })];
+  let hint = ph.error ? (PHONE_ERRORS[ph.error] || 'Something went wrong') : !noRelay && !ph.connected ? PHONE_ERRORS['relay-unreachable'] : '';
+
+  if (noRelay) {
+    out.push(h('div', { class: 'set-hint pad', text: 'Needs a relay address (below)' }));
+    hint = '';
+  } else if (ph.linked) {
+    out.push(
+      row('Connected', ph.number || null, h('button', { class: 'btn ghost', text: 'Disconnect', onclick: () => phoneSend({ type: 'phone-unlink' }) })),
+      row('Phone approvals on this machine', null, toggle(ph.enabled, (v) => phoneSend({ type: 'phone-settings', enabled: v }))),
+      row('Send to my phone', null, h('select', { class: 'set-select', onchange: (e) => phoneSend({ type: 'phone-settings', mode: e.target.value }) },
+        [['away', 'Only when I\'m away'], ['everything', 'Send everything']].map(([v, label]) => h('option', { value: v, text: label, selected: v === ph.mode })))));
+    const credit = ph.billing === 'off' ? 'Not charged'
+      : (ph.billing === 'trial' || ph.billing === 'on') && ph.balanceMicroUsd != null ? `${money(ph.balanceMicroUsd)} left${ph.billing === 'trial' ? ' (trial)' : ''}` : null;
+    if (credit) out.push(row('Credit', null, h('span', { class: 'set-value', text: credit })));
+  } else if (ph.code) {
+    const ms = ph.code.expiresAt - Date.now();
+    const bot = String(ph.code.botNumber || '').replace(/\D/g, '');
+    if (ms > 0) {
+      out.push(h('div', { class: 'set-row phone-code' },
+        h('div', { class: 'code', text: ph.code.code }),
+        h('div', { class: 'set-hint', text: 'Send this code to the Agent Deck bot on WhatsApp within 10 minutes' }),
+        h('div', { class: 'set-hint code-left', 'data-expires': ph.code.expiresAt, text: codeLeftText(ms) }),
+        h('div', { class: 'btns' },
+          bot ? h('button', { class: 'btn allow', text: 'Open WhatsApp', onclick: () => window.deck.openLink('https://wa.me/' + bot + '?text=' + encodeURIComponent(ph.code.code)) }) : null,
+          h('button', { class: 'btn ghost', text: 'Cancel', onclick: () => phoneSend({ type: 'phone-cancel-link' }) }))));
+    } else {
+      out.push(h('div', { class: 'set-row phone-code' },
+        h('div', { class: 'set-hint', text: 'Code expired' }),
+        h('div', { class: 'btns' },
+          h('button', { class: 'btn allow', text: 'Get a new code', onclick: () => { const n = d.lastNumber || d.number.trim(); if (n) phoneSend({ type: 'phone-link', number: n }); } }),
+          h('button', { class: 'btn ghost', text: 'Cancel', onclick: () => phoneSend({ type: 'phone-cancel-link' }) }))));
+    }
+  } else {
+    out.push(h('div', { class: 'set-row add-hub' },
+      h('div', { class: 'set-label' },
+        h('div', { text: 'Get approvals on WhatsApp' }),
+        h('div', { class: 'set-hint', text: 'Enter your number, then send the code we give you to the Agent Deck bot.' }),
+        h('div', { class: 'add-fields' }, h('input', {
+          class: 'set-input', 'data-field': 'phone-number', placeholder: '+27 82 123 4567', value: d.number, spellcheck: 'false', autocomplete: 'off', inputmode: 'tel',
+          oninput: (e) => { d.number = e.target.value; },
+          onkeydown: (e) => { if (e.key === 'Enter') connectNow(); },
+        }))),
+      h('button', { class: 'btn allow', text: 'Connect', onclick: connectNow })));
+  }
+  if (hint) out.push(h('div', { class: 'set-error pad', text: hint }));
+
+  out.push(h('div', { class: 'set-row add-hub' },
+    h('div', { class: 'set-label' },
+      h('div', { text: 'Relay address' }),
+      h('div', { class: 'set-hint', text: 'Advanced. The service that passes messages to WhatsApp.' }),
+      h('div', { class: 'add-fields' }, h('input', {
+        class: 'set-input', 'data-field': 'phone-relay', placeholder: 'wss://…', value: d.relay, spellcheck: 'false', autocomplete: 'off',
+        oninput: (e) => { d.relay = e.target.value; },
+        onkeydown: (e) => { if (e.key === 'Enter') phoneSend({ type: 'phone-settings', relay: d.relay.trim() }); },
+      }))),
+    h('button', { class: 'btn', text: 'Save', onclick: () => phoneSend({ type: 'phone-settings', relay: d.relay.trim() }) })));
+  return out;
 }
 
 // Other machines whose sessions and agents this panel shows ("hubs"), and how to share this one.
@@ -258,6 +352,7 @@ function connect(hub) {
     hub.connected = true; hub.retry = 0;
     state.settingsDirty = true; // "connected" in Settings → Other machines
     ws.send(JSON.stringify({ type: 'hello', approvals: state.approvals }));
+    if (!hub.local) sendPresence(hub);
     render();
   };
   ws.onmessage = (ev) => {
@@ -270,6 +365,10 @@ function connect(hub) {
         const sig = JSON.stringify(msg.devices || []);
         if (sig !== hub.devicesSig) { hub.devicesSig = sig; state.settingsDirty = true; }
         hub.devices = msg.devices || [];
+        const psig = phoneSig(msg.phone);
+        if (psig !== hub.phoneSig) { hub.phoneSig = psig; state.settingsDirty = true; }
+        hub.phone = msg.phone || null; // `sent` changes freely; the cards read it from pending.phone
+        if (msg.localActive !== hub.localActive) { hub.localActive = msg.localActive; sendPresence(); }
         hub.pairRequests = msg.pairRequests || [];
         notifyPairRequests(hub);
       }
@@ -293,6 +392,15 @@ function scheduleReconnect(hub) {
   hub.timer = setTimeout(() => connect(hub), 500 * 2 ** hub.retry);
 }
 function send(hub, msg) { if (hub.ws && hub.ws.readyState === 1) hub.ws.send(JSON.stringify(msg)); }
+
+// Tell the other machines whether you're at this one (so they don't treat you as away).
+// Only when this machine knows (localActive is true/false, never null), never to this machine's own daemon.
+function sendPresence(only) {
+  const active = localHub()?.localActive;
+  if (typeof active !== 'boolean') return;
+  for (const hub of only ? [only] : state.hubs) if (!hub.local && hub.connected) send(hub, { type: 'presence', active });
+}
+setInterval(() => sendPresence(), 30000);
 
 function setHubs(list) {
   const byUrl = new Map(state.hubs.map((x) => [x.url + '|' + x.token, x]));
@@ -460,7 +568,16 @@ function approvalBox(hub, s, p) {
       p.canAlways ? h('button', { class: 'btn', text: 'Always', title: 'Allow and stop asking for this', onclick: () => decide(hub, p.id, { behavior: 'allow', always: true }) }) : null,
       h('button', { class: 'btn deny', text: 'Deny', onclick: () => decide(hub, p.id, { behavior: 'deny' }) }),
       h('button', { class: 'btn ghost', text: 'Terminal', title: 'Answer in the terminal instead', onclick: () => release(hub, p.id) })),
+    phoneNote(p),
     h('div', { class: 'countdown', 'data-expires': p.expiresAt, text: countdownText(left) }));
+}
+// From any machine's daemon: did the prompt reach your phone?
+function phoneNote(p) {
+  if (p.phone === 'sent') return h('div', { class: 'phone-note', text: 'Sent to your phone' });
+  if (typeof p.phone === 'string' && p.phone.startsWith('failed:')) {
+    return h('div', { class: 'phone-note bad', text: `Couldn't send to your phone: ${PHONE_FAIL[p.phone.slice(7)] || 'not sent'}` });
+  }
+  return null;
 }
 // Claude Code shows the prompt in the terminal too; after this the panel can no longer answer.
 const countdownText = (left) => `Answer here or in the terminal · ${left >= 60 ? Math.ceil(left / 60) + ' min' : left + 's'} left here`;
@@ -506,6 +623,7 @@ function questionBox(hub, s, p) {
     h('div', { class: 'btns' },
       single ? null : h('button', { class: 'btn allow', text: 'Send', onclick: () => complete() && submit() }),
       h('button', { class: 'btn ghost', text: 'Terminal', title: 'Answer in the terminal instead', onclick: () => release(hub, p.id) })),
+    phoneNote(p),
     h('div', { class: 'countdown', 'data-expires': p.expiresAt, text: countdownText(left) }));
 }
 
@@ -759,6 +877,11 @@ setInterval(() => {
   for (const el of document.querySelectorAll('.countdown')) {
     const left = Math.max(0, Math.round((Number(el.dataset.expires) - Date.now()) / 1000));
     el.textContent = countdownText(left);
+  }
+  for (const el of document.querySelectorAll('.code-left')) {
+    const ms = Number(el.dataset.expires) - Date.now();
+    if (ms > 0) el.textContent = codeLeftText(ms);
+    else { state.settingsDirty = true; render(); break; } // the code ran out: show "Code expired"
   }
 }, 1000);
 
