@@ -387,7 +387,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
 - [ ] **Step 3: Implement** `env.js`, `worker.js` and `relay-do.js`, plus `relay/README.md`:
   - deploying your own relay: `npm i`, `npx wrangler deploy`, then `npx wrangler secret put` for each secret and operator value;
   - the Meta app and test number, the webhook URL and the `messages` subscription;
-  - the template `agent_deck_needs_you` (utility; body `{{1}} needs you: {{2}}`; quick reply "Show");
+  - the template `agent_deck_needs_you` (utility; body `Agent Deck: {{1}} needs you: {{2}}. Tap Show to see it.` (Meta rejects a body that starts or ends with a variable); quick reply "Show");
   - billing off by default;
   - Agent Deck → Settings → Relay address.
 - [ ] **Step 4: Check it runs.**
