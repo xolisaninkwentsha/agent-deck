@@ -93,10 +93,12 @@ In **WhatsApp Manager → Message templates**, create a template:
 - **Category:** Utility
 - **Name:** `agent_deck_needs_you`
 - **Language:** English (`en`)
-- **Body:** `{{1}} needs you: {{2}}`. For the samples Meta asks for, use something like `my-project` and `Run a command`. The relay fills in the project name and a short title.
+- **Body:** `Agent Deck: {{1}} needs you: {{2}}. Tap Show to see it.` For the samples Meta asks for, use something like `my-project` and `Run a command`. The relay fills in the project name and a short title.
 - **Button:** Quick reply, with the text `Show`
 
-Meta reviews templates, usually within minutes. Until yours is approved, prompts only reach you inside the 24-hour window; sending the bot any message opens it. If you use another name or language, set `TEMPLATE_NAME` and `TEMPLATE_LANG` to match. Any utility template works if it has two body variables (project, then title) and one quick-reply button.
+Meta rejects a template body that starts or ends with a variable. If you reword the body, keep some fixed text before `{{1}}` and after `{{2}}`.
+
+Meta reviews templates, usually within minutes. Until yours is approved, prompts only reach you inside the 24-hour window; sending the bot any message opens it. If you use another name or language, set `TEMPLATE_NAME` and `TEMPLATE_LANG` to match. Any utility template works if it has two body variables (project, then title), neither at the very start nor the very end, and one quick-reply button.
 
 ## Billing
 

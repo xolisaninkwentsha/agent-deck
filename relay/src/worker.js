@@ -99,6 +99,7 @@ async function inbound(request, env) {
       logError('webhook forward', e);
     }
   }
+  // 200 even if the forward failed: Meta retries for up to 7 days but seen: lasts 1, so a 5xx could replay a stale "stop" or typed reply.
   return text('ok');
 }
 
