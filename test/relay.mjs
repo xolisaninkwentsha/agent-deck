@@ -4,7 +4,7 @@ import { verifySignature, parseWebhook, promptMessage, textMessage, templateMess
 import { MemoryStore } from '../relay/src/memory-store.js';
 import { CODE_ALPHABET, newCode, findCode, newRef, sha256Hex, normalizeNumber, maskNumber } from '../relay/src/ids.js';
 import { priceFor, reserve, release } from '../relay/src/credit.js';
-import { createRelay } from '../relay/src/core.js';
+import { createRelay, errorReplies } from '../relay/src/core.js';
 import { parseEnv } from '../relay/src/env.js';
 
 let passed = 0;
@@ -33,25 +33,37 @@ async function main() {
   check('verifySignature accepts a valid HMAC and rejects tampered, missing or malformed ones');
 
   // parseWebhook
-  const btn = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.B', timestamp: '1700000000', type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'r1:allow', title: 'Allow' } } }] }));
+  const btn = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.B', timestamp: '1700000000', type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'r1:allow', title: 'Allow' } } }] }), 'PN');
   assert.deepEqual(btn, { inbound: [{ id: 'wamid.B', from: '27820000000', ts: 1700000000000, buttonId: 'r1:allow' }], statuses: [] });
-  const lst = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.L', timestamp: '1700000001', type: 'interactive', interactive: { type: 'list_reply', list_reply: { id: 'r1:q0:o4', title: 'Five' } } }] }));
+  const lst = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.L', timestamp: '1700000001', type: 'interactive', interactive: { type: 'list_reply', list_reply: { id: 'r1:q0:o4', title: 'Five' } } }] }), 'PN');
   assert.equal(lst.inbound[0].buttonId, 'r1:q0:o4');
-  const tpl = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.T', timestamp: '1700000002', type: 'button', button: { payload: 'r1:show', text: 'Show' } }] }));
+  const tpl = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.T', timestamp: '1700000002', type: 'button', button: { payload: 'r1:show', text: 'Show' } }] }), 'PN');
   assert.equal(tpl.inbound[0].buttonId, 'r1:show');
   check('parseWebhook reads button, list and template-button replies');
 
-  const txt = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.X', timestamp: '1700000003', type: 'text', text: { body: '1 3' }, context: { id: 'wamid.Q' } }] }));
+  const txt = parseWebhook(hook({ messages: [{ from: '27820000000', id: 'wamid.X', timestamp: '1700000003', type: 'text', text: { body: '1 3' }, context: { id: 'wamid.Q' } }] }), 'PN');
   assert.deepEqual(txt.inbound, [{ id: 'wamid.X', from: '27820000000', ts: 1700000003000, text: '1 3', contextId: 'wamid.Q' }]);
-  const st = parseWebhook(hook({ statuses: [{ id: 'wamid.S', status: 'failed', recipient_id: '27820000000', timestamp: '1700000004' }] }));
+  const st = parseWebhook(hook({ statuses: [{ id: 'wamid.S', status: 'failed', recipient_id: '27820000000', timestamp: '1700000004' }] }), 'PN');
   assert.deepEqual(st, { inbound: [], statuses: [{ id: 'wamid.S', status: 'failed', recipient: '27820000000' }] });
   check('parseWebhook reads text with context and statuses, ts in ms');
 
   const empty = { inbound: [], statuses: [] };
   for (const bad of [null, undefined, 'x', 5, [], {}, { entry: 'x' }, { entry: [null, 3, { changes: 'x' }, { changes: [null, { value: 'x' }, { value: { messages: 'x', statuses: 7 } }] }] }, { entry: [{ changes: [{ value: { messages: [null, 4, {}, { from: 1 }] } }] }] }]) {
-    assert.deepEqual(parseWebhook(bad), empty);
+    assert.deepEqual(parseWebhook(bad, 'PN'), empty);
   }
   check('parseWebhook never throws on malformed bodies');
+
+  const ours = { from: '27820000000', id: 'wamid.O', timestamp: '1700000005', type: 'text', text: { body: 'hi' } };
+  const two = { entry: [{ changes: [
+    { value: { metadata: { phone_number_id: 'OTHER' }, messages: [{ ...ours, id: 'wamid.N' }], statuses: [{ id: 'wamid.SN', status: 'failed' }] } },
+    { value: { messages: [{ ...ours, id: 'wamid.M' }] } },
+    { value: { metadata: { phone_number_id: 'PN' }, messages: [ours], statuses: [{ id: 'wamid.SO', status: 'failed' }] } },
+  ] }] };
+  const mine = parseWebhook(two, 'PN');
+  assert.deepEqual(mine.inbound.map((m) => m.id), ['wamid.O']);
+  assert.deepEqual(mine.statuses.map((x) => x.id), ['wamid.SO']);
+  for (const id of [undefined, '', null, 5]) assert.deepEqual(parseWebhook(two, id), empty);
+  check('parseWebhook keeps only messages and statuses for the configured number; no number id keeps nothing');
 
   // promptMessage
   const approval = { kind: 'approval', project: 'deck', title: 'Run Bash', detail: 'npm test', questions: [] };
@@ -109,6 +121,22 @@ async function main() {
   assert.equal(t, 'x'.repeat(19) + '…');
   check('long option titles are cut with an ellipsis');
 
+  const twins = ['Deploy to production now', 'Deploy to production later', 'Skip'];
+  const tw = promptMessage('2782', 'r1', q(twins), 0);
+  assert.equal(tw.interactive.type, 'list');
+  assert.deepEqual(tw.interactive.action.sections[0].rows.map((r) => r.id), ['r1:q0:o0', 'r1:q0:o1', 'r1:q0:o2']);
+  assert.deepEqual(tw.interactive.action.sections[0].rows.map((r) => r.description), [undefined, twins[1], undefined]);
+  assert.equal(promptMessage('2782', 'r1', q(['Deploy to production', 'Deploy to staging']), 0).interactive.type, 'button');
+  check('options whose cut button titles collide go out as a list instead');
+
+  const tail = '… (+4100 more characters: check the computer)';
+  const cmd = { ...q([]), kind: 'approval', project: 'p'.repeat(300), title: 'Run command', detail: 'c'.repeat(900 - tail.length) + tail };
+  const shown = promptMessage('2782', 'r1', cmd, 0).interactive.body.text;
+  assert.ok(Array.from(shown).length <= 1024);
+  assert.ok(shown.endsWith(`\n\n${cmd.detail}`), 'the whole detail survives, with how much is hidden');
+  assert.ok(shown.startsWith('p'.repeat(59) + '… · Claude wants to run command'), 'a long project name is cut instead');
+  check('an approval keeps its whole detail (up to 900) under a long project name, within 1024');
+
   const big = promptMessage('2782', 'r1', { ...approval, detail: 'd'.repeat(5000) }, 0);
   assert.ok(big.interactive.body.text.length <= 1024 && big.interactive.body.text.endsWith('…'));
   const bigQ = promptMessage('2782', 'r1', q(Array.from({ length: 12 }, () => 'y'.repeat(200)), true), 0);
@@ -149,6 +177,18 @@ async function main() {
   const badJson = await mk(() => ({ ok: true, status: 200, json: async () => { throw new Error('x'); } })).send({});
   assert.equal(badJson.ok, false);
   check('createSender returns ok/id, or ok:false without throwing');
+
+  assert.ok(calls[0][1].signal instanceof AbortSignal, 'every send carries a timeout signal');
+  // A Graph call that never answers is abandoned when its signal fires.
+  const hang = (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+  const t0 = Date.now();
+  const awake = setTimeout(() => {}, 5000); // AbortSignal.timeout's timer doesn't keep Node running
+  const stuck = await createSender({ fetch: hang, token: 't', phoneNumberId: 'p', graphVersion: 'v1', timeoutMs: 50 }).send({});
+  clearTimeout(awake);
+  assert.equal(stuck.ok, false);
+  assert.match(stuck.error, /TimeoutError/);
+  assert.ok(Date.now() - t0 < 2000);
+  check('createSender gives up on a send that takes longer than its timeout (10 s by default)');
 
   // store
   const mstore = new MemoryStore();
@@ -452,17 +492,35 @@ async function main() {
         const [lc] = await relay.machineMessage(kh, { type: 'link-start', number });
         await relay.webhook({ inbound: [{ id: 'link' + n++, from: number, text: lc.code, ts: clock.t }], statuses: [] });
       }
+      // decide, prompt-sent and prompt-failed carry the account's balance as it stands after the
+      // operation (null with no linked account). Checked here against the store, then left out,
+      // so the comparisons below stay about the rest.
+      const balanceFor = async (kh) => {
+        const m = await store.get('machine:' + kh);
+        const a = m && m.number ? await store.get('account:' + m.number) : undefined;
+        return a ? a.balance : null;
+      };
+      const unbalanced = async (msg, kh) => {
+        if (!['decide', 'prompt-sent', 'prompt-failed'].includes(msg.type)) return msg;
+        assert.equal(msg.balanceMicroUsd, await balanceFor(kh), `${msg.type} carries the balance`);
+        const { balanceMicroUsd, ...rest } = msg;
+        return rest;
+      };
+      const routesOf = async (routes) => Promise.all(routes.map(async (r) => ({ ...r, msg: await unbalanced(r.msg, r.keyHash) })));
       const ask = async (kh, pendingId, prompt, expiresAt = clock.t + 300000) => {
-        const r = await relay.machineMessage(kh, { type: 'prompt', pendingId, expiresAt, prompt });
+        const replies = await relay.machineMessage(kh, { type: 'prompt', pendingId, expiresAt, prompt });
+        const r = await Promise.all(replies.map((m) => unbalanced(m, kh)));
         return { r, ref: await store.get(`pending:${kh}:${pendingId}`) };
       };
-      const tap = (id, buttonId, from = N) => relay.webhook({ inbound: [{ id, from, ts: clock.t, buttonId }], statuses: [] });
-      const say = (id, text, contextId, from = N) => relay.webhook({ inbound: [{ id, from, ts: clock.t, text, ...(contextId ? { contextId } : {}) }], statuses: [] });
+      const hook = async (parsed) => routesOf(await relay.webhook(parsed));
+      const tap = (id, buttonId, from = N) => hook({ inbound: [{ id, from, ts: clock.t, buttonId }], statuses: [] });
+      const say = (id, text, contextId, from = N) => hook({ inbound: [{ id, from, ts: clock.t, text, ...(contextId ? { contextId } : {}) }], statuses: [] });
       const lastId = () => 'w' + sent.length;
       const balance = async (number = N) => (await store.get('account:' + number)).balance;
-      return { store, sent, sender, clock, relay, ask, tap, say, lastId, balance };
+      return { store, sent, sender, clock, relay, ask, tap, say, hook, lastId, balance };
     };
     const decideRoute = (keyHash, pendingId, decision, expiresAt) => ({ keyHash, msg: { type: 'decide', pendingId, decision }, expiresAt });
+    const failedRoute = (keyHash, pendingId, reason, expiresAt) => ({ keyHash, msg: { type: 'prompt-failed', pendingId, reason }, expiresAt });
     const approval = { kind: 'approval', project: 'deck', title: 'Run command', detail: 'npm test', questions: [] };
     const planPrompt = { kind: 'plan', project: 'deck', title: 'Plan', detail: 'Do it', questions: [] };
     const question = (...questions) => ({ kind: 'question', project: 'deck', title: 'Question', detail: '', questions });
@@ -606,15 +664,15 @@ async function main() {
     }
 
     {
-      const { store, clock, relay, ask, balance } = await setup();
+      const { store, clock, ask, hook, balance } = await setup();
       clock.t = (await store.get('account:' + N)).windowUntil;
       const { ref } = await ask('kh1', 'p1', approval);
       const before = await balance();
       const show = { inbound: [{ id: 'dup1', from: N, ts: clock.t, buttonId: `${ref}:show` }], statuses: [] };
-      await relay.webhook(show);
-      await relay.webhook(show);
+      await hook(show);
+      await hook(show);
       const allow = { inbound: [{ id: 'dup2', from: N, ts: clock.t, buttonId: `${ref}:allow` }], statuses: [] };
-      const routes = [...(await relay.webhook(allow)), ...(await relay.webhook(allow))];
+      const routes = [...(await hook(allow)), ...(await hook(allow))];
       assert.deepEqual(routes, [decideRoute('kh1', 'p1', { behavior: 'allow' }, clock.t + 300000)]);
       assert.equal(await balance(), before - price);
       check('duplicate inbound id is ignored');
@@ -647,7 +705,12 @@ async function main() {
       assert.deepEqual(await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p4', ok: false, reason: 'gone' }), []);
       assert.equal(sent.length, count + 1);
       assert.equal(sent.at(-1).text.body, TOO_LATE);
-      assert.deepEqual(await stateOf(store, ref), ['closed', 'gone']);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'refused']);
+      // closed in the terminal (No or Esc): the hook is gone, so the phone hears it was closed there
+      ({ ref } = await ask('kh1', 'p5', approval));
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p5', why: 'gone' });
+      assert.deepEqual(await tap('t6', `${ref}:allow`), []);
+      assert.equal(sent.at(-1).text.body, 'Closed on the computer.');
       check('late taps');
     }
 
@@ -716,7 +779,7 @@ async function main() {
       const { store, sent, relay } = await setup([]);
       await relay.hello('kx', { machine: 'x', version: '1' });
       for (const kh of ['kx', 'nobody']) {
-        assert.deepEqual(await relay.machineMessage(kh, { type: 'prompt', pendingId: 'p1', expiresAt: T0 + 300000, prompt: approval }), [{ type: 'prompt-failed', pendingId: 'p1', reason: 'not-linked' }]);
+        assert.deepEqual(await relay.machineMessage(kh, { type: 'prompt', pendingId: 'p1', expiresAt: T0 + 300000, prompt: approval }), [{ type: 'prompt-failed', pendingId: 'p1', reason: 'not-linked', balanceMicroUsd: null }]);
       }
       assert.equal(sent.length, 0);
       assert.equal((await store.list('prompt:')).size, 0);
@@ -728,25 +791,40 @@ async function main() {
       const { store, sender, ask, tap } = await setup();
       const { ref } = await ask('kh1', 'p1', question(colour, size));
       sender.fail = true;
-      assert.deepEqual(await tap('t1', `${ref}:q0:o0`), []);
+      assert.deepEqual(await tap('t1', `${ref}:q0:o0`), [failedRoute('kh1', 'p1', 'send-failed', T0 + 300000)]);
       assert.deepEqual(await stateOf(store, ref), ['closed', 'send-failed']);
-      check('a next question that cannot be sent closes the prompt');
+      // out of credit for the next question: the daemon hears why
+      sender.fail = false;
+      const { ref: ref2 } = await ask('kh1', 'p2', question(colour, size));
+      await store.put('account:' + N, { ...(await store.get('account:' + N)), balance: 0 });
+      assert.deepEqual(await tap('t2', `${ref2}:q0:o0`), [failedRoute('kh1', 'p2', 'no-credit', T0 + 300000)]);
+      check('a next question that cannot be sent closes the prompt and tells the daemon (prompt-failed)');
     }
 
     {
-      const { store, relay, ask, balance, lastId } = await setup();
+      const { store, sent, relay, ask, hook, balance, lastId } = await setup();
       const before = await balance();
       await ask('kh1', 'p1', approval);
       const id = lastId();
       assert.equal(await balance(), before - price);
       const failed = { inbound: [], statuses: [{ id, status: 'failed', recipient: N }] };
-      assert.deepEqual(await relay.webhook(failed), []);
+      assert.deepEqual(await hook(failed), [failedRoute('kh1', 'p1', 'send-failed', T0 + 300000)]);
       assert.equal(await balance(), before);
       assert.equal((await store.get('msg:' + id)).refunded, true);
-      await relay.webhook(failed);
-      await relay.webhook({ inbound: [], statuses: [{ id, status: 'delivered', recipient: N }, { id: 'wamid.unknown', status: 'failed', recipient: N }] });
+      assert.deepEqual(await stateOf(store, await store.get('pending:kh1:p1')), ['closed', 'send-failed']);
+      assert.deepEqual(await hook(failed), []);
+      await hook({ inbound: [], statuses: [{ id, status: 'delivered', recipient: N }, { id: 'wamid.unknown', status: 'failed', recipient: N }] });
       assert.equal(await balance(), before);
-      check('failed status refunds once');
+      // a failed message of a prompt already closed, or of no prompt ("Connected"), only refunds
+      const { ref } = await ask('kh1', 'p2', approval);
+      const id2 = lastId();
+      await relay.machineMessage('kh1', { type: 'prompt-closed', pendingId: 'p2', why: 'answered' });
+      const mid = await balance();
+      assert.equal(sent[0].text.body, 'Connected: kh1');
+      assert.deepEqual(await hook({ inbound: [], statuses: [{ id: id2, status: 'failed', recipient: N }, { id: 'w1', status: 'failed', recipient: N }] }), []);
+      assert.equal(await balance(), mid + 2 * price);
+      assert.deepEqual(await stateOf(store, ref), ['closed', 'answered']);
+      check('failed status refunds once, and closes an open prompt with prompt-failed to its daemon');
     }
 
     {
@@ -823,7 +901,7 @@ async function main() {
       clock.t += 1000;
       await relay.machineMessage('kh1', { type: 'decide-ack', pendingId: 'p6', ok: false, reason: 'gone' });
       assert.equal(sent.at(-1).text.body, TOO_LATE);
-      await closedAs(ref, 'plan', 'gone');
+      await closedAs(ref, 'plan', 'refused');
       await lateReply('f2', `${ref}:approve`, TOO_LATE);
       check('closing a prompt keeps no prompt text or answers, and late taps still get the right reply');
     }
@@ -863,7 +941,7 @@ async function main() {
       clock.t += 300001;
       const { ref: fresh } = await ask('kh1', 'p2', approval);
       const freshBefore = await store.get('prompt:' + fresh);
-      assert.deepEqual(await relay.sweep(), { closed: 1, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 0 });
+      assert.deepEqual(await relay.sweep(), { closed: 1, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 0, machines: 0 });
       const swept = await store.get('prompt:' + old);
       assert.deepEqual([swept.state, swept.closedWhy, swept.closedAt], ['closed', 'timeout', clock.t]);
       assert.deepEqual(swept.prompt, { kind: 'question' });
@@ -908,7 +986,7 @@ async function main() {
       await relay.queue('kq', { type: 'c' }, T0 + 2000);
       await relay.queue('kz', { type: 'd' }, T0 + 1000);
       clock.t = T0 + 1000;
-      assert.deepEqual(await relay.sweep(), { closed: 0, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 2 });
+      assert.deepEqual(await relay.sweep(), { closed: 0, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 2, machines: 0 });
       assert.deepEqual((await store.get('outbox:kq')).map((e) => e.msg.type), ['b', 'c']);
       assert.equal(await store.get('outbox:kz'), undefined);
       assert.ok(await store.get('code:' + lc.code));
@@ -935,6 +1013,105 @@ async function main() {
       assert.deepEqual(await keys('seen:'), []);
       assert.deepEqual([...(await store.list('msg:')).values()].map((m) => m.at), [T0 + D / 2]);
       check('sweep deletes seen ids after a day and message records after 7 days');
+    }
+
+    {
+      // kh1 is linked; ku said hello once and never linked; kr linked, then unlinked, and is seen later
+      const { store, clock, relay } = await setup([['kh1', N], ['kr', N2]]);
+      await relay.hello('ku', { machine: 'ku', version: '1' });
+      await relay.queue('ku', { type: 'status' });
+      assert.equal((await store.get('machine:ku')).lastSeen, T0);
+      clock.t = T0 + 10 * D;
+      await relay.machineMessage('kr', { type: 'unlink' });
+      await relay.hello('kr', { machine: 'kr', version: '1' });
+      clock.t = T0 + 30 * D;
+      assert.equal((await relay.sweep()).machines, 0);
+      clock.t = T0 + 30 * D + 1;
+      assert.equal((await relay.sweep()).machines, 1);
+      assert.equal(await store.get('machine:ku'), undefined);
+      assert.equal(await store.get('outbox:ku'), undefined);
+      assert.ok(await store.get('machine:kr'));
+      clock.t = T0 + 40 * D + 1;
+      assert.equal((await relay.sweep()).machines, 1);
+      assert.equal(await store.get('machine:kr'), undefined);
+      assert.equal((await store.get('machine:kh1')).number, N, 'a linked machine stays however long it is quiet');
+      check('sweep forgets machines with no number not seen for 30 days (and their outbox); linked ones stay');
+    }
+
+    {
+      // what each reply says about the balance, as numbers
+      const { relay, clock, ask, tap, balance } = await setup();
+      const start = await balance();
+      const raw = (pendingId) => relay.machineMessage('kh1', { type: 'prompt', pendingId, expiresAt: clock.t + 300000, prompt: approval });
+      assert.deepEqual(await raw('b1'), [{ type: 'prompt-sent', pendingId: 'b1', balanceMicroUsd: start - price }]);
+      assert.deepEqual(await raw('b1'), [{ type: 'prompt-sent', pendingId: 'b1', balanceMicroUsd: start - price }]);
+      const { ref } = await ask('kh1', 'b2', approval);
+      const [route] = await relay.webhook({ inbound: [{ id: 'tb', from: N, ts: clock.t, buttonId: `${ref}:allow` }], statuses: [] });
+      assert.equal(route.msg.balanceMicroUsd, start - 2 * price);
+      await tap('tb2', `${ref}:deny`);
+      check('prompt-sent and decide carry the account balance after the charge');
+    }
+
+    {
+      // M8: an older message arriving late never shortens the window
+      const { store, clock, say } = await setup();
+      const until = (await store.get('account:' + N)).windowUntil;
+      await say('late-old', 'hi', undefined, N);
+      clock.t = T0 - 3600000;
+      await say('older', 'hi', undefined, N);
+      assert.equal((await store.get('account:' + N)).windowUntil, until);
+      check('the 24-hour window only moves forward');
+    }
+
+    {
+      // A prompt that throws part-way (the message record can't be written after the send) is
+      // closed, and the daemon is told prompt-failed/error; a repeat of its pendingId goes afresh.
+      const store = new MemoryStore();
+      const sent = [];
+      let breakMsg = false;
+      const put = store.put.bind(store);
+      store.put = async (key, value) => {
+        if (breakMsg && key.startsWith('msg:')) throw new Error('storage down');
+        return put(key, value);
+      };
+      const errors = [];
+      const relay = createRelay({ store, sender: { send: async (p) => { sent.push(p); return { ok: true, id: 'w' + sent.length }; } }, config, now: () => T0, onError: (where, e) => errors.push([where, e.message]) });
+      await relay.hello('kh1', { machine: 'kh1', version: '1' });
+      const [lc] = await relay.machineMessage('kh1', { type: 'link-start', number: N });
+      await relay.webhook({ inbound: [{ id: 'l', from: N, text: lc.code, ts: T0 }], statuses: [] });
+      breakMsg = true;
+      assert.deepEqual(await relay.machineMessage('kh1', { type: 'prompt', pendingId: 'p1', expiresAt: T0 + 300000, prompt: approval }), [{ type: 'prompt-failed', pendingId: 'p1', reason: 'error', balanceMicroUsd: null }]);
+      assert.deepEqual(errors, [['prompt', 'storage down']]);
+      assert.deepEqual(await stateOf(store, await store.get('pending:kh1:p1')), ['closed', 'error']);
+      breakMsg = false;
+      const again = await relay.machineMessage('kh1', { type: 'prompt', pendingId: 'p1', expiresAt: T0 + 300000, prompt: approval });
+      assert.equal(again[0].type, 'prompt-sent');
+      assert.deepEqual(await relay.machineMessage('kh1', { type: 'hello', machine: 'kh1' }).then((r) => r[0].linked), true);
+      assert.deepEqual(errorReplies({ type: 'prompt', pendingId: 'p9' }), [{ type: 'prompt-failed', pendingId: 'p9', reason: 'error', balanceMicroUsd: null }]);
+      for (const other of [{ type: 'hello' }, { type: 'prompt' }, { type: 'prompt', pendingId: 5 }, null]) assert.deepEqual(errorReplies(other), []);
+      check('a prompt that throws is closed and answered prompt-failed with reason error (errorReplies covers a relay that can\'t start)');
+    }
+
+    {
+      // One webhook item that throws doesn't lose the others' routes.
+      const { store, clock, relay, ask } = await setup();
+      const { ref } = await ask('kh1', 'p1', approval);
+      const { ref: ref2 } = await ask('kh1', 'p2', approval);
+      const get = store.get.bind(store);
+      store.get = async (key) => {
+        if (key === 'seen:boom' || key === 'msg:wamid.boom') throw new Error('bad record');
+        return get(key);
+      };
+      const routes = await relay.webhook({
+        inbound: [
+          { id: 'ok1', from: N, ts: clock.t, buttonId: `${ref}:allow` },
+          { id: 'boom', from: N, ts: clock.t, buttonId: `${ref2}:allow` },
+          { id: 'ok2', from: N, ts: clock.t, buttonId: `${ref2}:deny` },
+        ],
+        statuses: [{ id: 'wamid.boom', status: 'failed', recipient: N }, { id: 'wamid.nothing', status: 'failed', recipient: N }],
+      });
+      assert.deepEqual(routes.map((r) => [r.msg.pendingId, r.msg.decision]), [['p1', { behavior: 'allow' }], ['p2', { behavior: 'deny' }]]);
+      check('a webhook item that throws is skipped; routes from the items before and after it are kept');
     }
   }
 
@@ -977,11 +1154,19 @@ async function main() {
     assert.equal(full.markupPercent, 20);
     assert.equal(full.hourlyCap, 30);
     assert.deepEqual(full.template, { name: 'mine', lang: 'en_US' });
-    assert.equal(parseEnv({ ...base, BILLING: 'on' }).billing, 'on');
+    assert.equal(parseEnv({ ...base, BILLING: 'on', RATES_JSON: '{"default":1}' }).billing, 'on');
     assert.equal(priceFor('27821234567', full), 6000);
     assert.equal(priceFor('447000000000', full), 10800);
-    assert.equal(priceFor('27821234567', parseEnv({ ...base, BILLING: 'trial' })), 0);
+    assert.equal(priceFor('27821234567', parseEnv({ ...base, RATES_JSON: '{"default":1}' })), 0);
     check('parseEnv reads RATES_JSON, BILLING, trial, markup, cap and template, so priceFor is always a number');
+
+    // Charging with a zero default rate would send messages free by mistake.
+    for (const billing of ['trial', 'on']) {
+      throwsNaming({ ...base, BILLING: billing }, 'RATES_JSON');
+      throwsNaming({ ...base, BILLING: billing, RATES_JSON: '{"default":0,"27":5000}' }, 'RATES_JSON');
+    }
+    assert.equal(parseEnv({ ...base, BILLING: 'off', RATES_JSON: '{"default":0}' }).billing, 'off');
+    check('parseEnv refuses BILLING trial or on with a default rate of 0');
 
     for (const bad of ['nope', '[1]', 'null', '5', '{}', '{"default":-1}', '{"default":"9000"}', '{"default":null}', '{"default":1e999}', '{"default":1,"27":"x"}', '{"default":1,"27":-5}']) {
       throwsNaming({ ...base, RATES_JSON: bad }, 'RATES_JSON');

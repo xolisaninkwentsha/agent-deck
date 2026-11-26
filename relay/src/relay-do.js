@@ -10,7 +10,7 @@
 // other event is delivered. The store adapter therefore calls ctx.storage directly and adds no other
 // awaits, and nothing here uses allowConcurrency or otherwise opts out of input gates.
 import { DurableObject } from 'cloudflare:workers';
-import { createRelay } from './core.js';
+import { createRelay, errorReplies } from './core.js';
 import { createSender } from './whatsapp.js';
 import { parseEnv } from './env.js';
 
@@ -48,7 +48,7 @@ export class RelayDO extends DurableObject {
         phoneNumberId: config.whatsapp.phoneNumberId,
         graphVersion: config.whatsapp.graphVersion,
       });
-      this.core = createRelay({ store, sender, config });
+      this.core = createRelay({ store, sender, config, onError: logError });
     }
     return this.core;
   }
@@ -78,17 +78,27 @@ export class RelayDO extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  // The core handles each webhook item on its own; each route is delivered on its own too, so one
+  // failure never drops the others.
   async webhook(request) {
+    let relay;
+    let routes;
     try {
       const parsed = await request.json();
-      const relay = this.relay();
-      const routes = await relay.webhook(parsed);
-      for (const route of routes) await this.deliver(relay, route);
-      return text('ok');
+      relay = this.relay();
+      routes = await relay.webhook(parsed);
     } catch (e) {
       logError('webhook', e);
       return text('error', 500);
     }
+    for (const route of routes) {
+      try {
+        await this.deliver(relay, route);
+      } catch (e) {
+        logError('deliver', e);
+      }
+    }
+    return text('ok');
   }
 
   // To the machine's open socket if it has one, else its outbox for the next hello. A replaced
@@ -118,11 +128,19 @@ export class RelayDO extends DurableObject {
     const attachment = ws.deserializeAttachment();
     const keyHash = attachment && attachment.keyHash;
     if (typeof keyHash !== 'string' || !KEY_HASH.test(keyHash)) return;
+    // The core already turns a prompt that throws into prompt-failed; this covers the rest (the
+    // config can't be read, say), so the daemon never waits on a prompt nobody is handling.
+    let replies;
     try {
-      const replies = await this.relay().machineMessage(keyHash, msg);
-      for (const reply of replies) ws.send(JSON.stringify(reply));
+      replies = await this.relay().machineMessage(keyHash, msg);
     } catch (e) {
       logError('machine message', e);
+      replies = errorReplies(msg);
+    }
+    for (const reply of replies) {
+      try {
+        ws.send(JSON.stringify(reply));
+      } catch {}
     }
   }
 

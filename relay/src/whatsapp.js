@@ -39,15 +39,17 @@ export async function verifySignature(rawBody, header, appSecret) {
 
 // ---- webhook ----
 
-export function parseWebhook(body) {
+// Only changes for our own number (phoneNumberId, WA_PHONE_NUMBER_ID) count: an app can have
+// several numbers, and their messages and statuses aren't ours. No id means nothing is ours.
+export function parseWebhook(body, phoneNumberId) {
   const inbound = [];
   const statuses = [];
-  if (!isObj(body)) return { inbound, statuses };
+  if (!isObj(body) || !str(phoneNumberId)) return { inbound, statuses };
   for (const entry of arr(body.entry)) {
     if (!isObj(entry)) continue;
     for (const change of arr(entry.changes)) {
       const value = isObj(change) ? change.value : null;
-      if (!isObj(value)) continue;
+      if (!isObj(value) || !isObj(value.metadata) || value.metadata.phone_number_id !== phoneNumberId) continue;
       for (const m of arr(value.messages)) {
         if (!isObj(m) || typeof m.id !== 'string' || typeof m.from !== 'string') continue;
         const item = { id: m.id, from: m.from, ts: (Number(m.timestamp) || 0) * 1000 };
@@ -92,14 +94,23 @@ function listMessage(to, text, options, ref, qIndex, footer) {
   return { ...base(to), type: 'interactive', interactive };
 }
 
+// Head, a blank line, then the detail. The detail keeps its end (a cut command ends by saying how
+// much is hidden), so a long project name or title gives way first.
+const HEAD_MIN = 100; // the detail never takes the head below this
+const PROJECT_MAX = 60;
+function withDetail(head, detail) {
+  const d = cut(detail ?? '', LIMITS.body - 2 - HEAD_MIN);
+  return `${cut(head, LIMITS.body - 2 - Array.from(d).length)}\n\n${d}`;
+}
+
 export function promptMessage(to, ref, prompt, qIndex) {
   const project = prompt.project;
   if (prompt.kind === 'approval') {
-    const text = cut(`${project} · Claude wants to ${String(prompt.title ?? '').toLowerCase()}\n\n${prompt.detail ?? ''}`, LIMITS.body);
+    const text = withDetail(`${cut(project, PROJECT_MAX)} · Claude wants to ${String(prompt.title ?? '').toLowerCase()}`, prompt.detail);
     return buttons(to, text, [[`${ref}:allow`, 'Allow'], [`${ref}:deny`, 'Deny']]);
   }
   if (prompt.kind === 'plan') {
-    const text = cut(`${project} · Plan to approve\n\n${prompt.detail ?? ''}`, LIMITS.body);
+    const text = withDetail(`${cut(project, PROJECT_MAX)} · Plan to approve`, prompt.detail);
     return buttons(to, text, [[`${ref}:approve`, 'Approve'], [`${ref}:plan`, 'Keep planning']]);
   }
   const q = arr(prompt.questions)[qIndex] ?? {};
@@ -111,7 +122,9 @@ export function promptMessage(to, ref, prompt, qIndex) {
     return { ...base(to), type: 'text', text: { body: `${cut(`${head}\n\n${numbered}`, room)}\n\n${MULTI_HINT}` } };
   }
   const text = cut(head, LIMITS.body);
-  if (options.length <= LIMITS.buttons) {
+  // Meta refuses two reply buttons with the same title, which cutting can make; list rows may repeat.
+  const titles = options.map((o) => cut(o, LIMITS.button));
+  if (options.length <= LIMITS.buttons && new Set(titles).size === titles.length) {
     return buttons(to, text, options.map((o, i) => [`${ref}:q${qIndex}:o${i}`, o]), FOOTER);
   }
   return listMessage(to, text, options, ref, qIndex, FOOTER);
@@ -140,7 +153,9 @@ export function templateMessage(to, ref, prompt, tpl) {
 
 // ---- sender ----
 
-export function createSender({ fetch: doFetch, token, phoneNumberId, graphVersion }) {
+// A send that takes longer than timeoutMs is abandoned as failed (its charge is released), so a
+// stuck Graph call can't hold a prompt, or the Durable Object, indefinitely.
+export function createSender({ fetch: doFetch, token, phoneNumberId, graphVersion, timeoutMs = 10000 }) {
   const url = `https://graph.facebook.com/${graphVersion}/${phoneNumberId}/messages`;
   return {
     async send(payload) {
@@ -149,6 +164,7 @@ export function createSender({ fetch: doFetch, token, phoneNumberId, graphVersio
           method: 'POST',
           headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(timeoutMs),
         });
         if (!res.ok) return { ok: false, error: `graph ${res.status}` };
         const data = await res.json();

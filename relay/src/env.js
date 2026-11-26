@@ -59,11 +59,14 @@ export function parseEnv(env) {
   if (!botNumber) throw new Error('BOT_NUMBER must be a phone number with its country code');
   const billing = raw(env, 'BILLING') ?? 'off';
   if (!BILLING.includes(billing)) throw new Error('BILLING must be off, trial or on');
+  const table = rates(env);
+  // Charging with a zero default rate would send most messages free, at the operator's cost.
+  if (billing !== 'off' && !(table.default > 0)) throw new Error('RATES_JSON needs a "default" rate above 0 when BILLING is trial or on');
   return {
     botNumber,
     billing,
     trialMicroUsd: amount(env, 'TRIAL_MICRO_USD', 0),
-    rates: rates(env),
+    rates: table,
     markupPercent: amount(env, 'MARKUP_PERCENT', 0),
     hourlyCap: amount(env, 'HOURLY_CAP', 60),
     codeTtlMs: 600000,

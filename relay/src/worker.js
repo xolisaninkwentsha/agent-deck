@@ -86,7 +86,7 @@ async function inbound(request, env) {
   } catch {
     return text('bad json', 400);
   }
-  const parsed = parseWebhook(body);
+  const parsed = parseWebhook(body, cfg.whatsapp.phoneNumberId);
   if (parsed.inbound.length || parsed.statuses.length) {
     try {
       const res = await relay(env).fetch('https://relay.internal/webhook', {

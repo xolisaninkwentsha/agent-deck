@@ -7,12 +7,14 @@ import { priceFor, reserve, release } from './credit.js';
 const HOUR_MS = 3600000;
 const DAY_MS = 86400000;
 const MSG_KEEP_MS = 7 * DAY_MS; // long enough for Meta's "failed" statuses and reply context
+const MACHINE_IDLE_MS = 30 * DAY_MS; // an unlinked machine not seen this long is forgotten
 const MAX_LINK_ATTEMPTS = 5;
 const MAX_PROMPT_MS = 600000; // Claude Code's hook timeout
 const WINDOW_MARGIN_MS = 300000; // under 5 min left in the 24 h window → template
 const LIST_ROWS = 10; // more options than a list holds → numbered text (as whatsapp.js does)
 const TOO_LATE = "Too late: it's waiting in the terminal.";
 const ALREADY = 'Already answered on the computer.';
+const CLOSED_HERE = 'Closed on the computer.'; // the hook was closed (No or Esc in the terminal)
 const KINDS = ['approval', 'plan', 'question'];
 const CLOSE_WHY = ['answered', 'timeout', 'gone'];
 const CHOICES = {
@@ -37,9 +39,22 @@ function typedAnswer(q, text) {
   return text;
 }
 
-export function createRelay({ store, sender, config, now = Date.now }) {
+// What a machine hears when its message couldn't be handled at all: a prompt is reported failed,
+// so the daemon never waits on it. Anything else gets no reply.
+export function errorReplies(msg) {
+  if (!msg || msg.type !== 'prompt' || typeof msg.pendingId !== 'string' || !msg.pendingId) return [];
+  return [{ type: 'prompt-failed', pendingId: msg.pendingId, reason: 'error', balanceMicroUsd: null }];
+}
+
+// onError(where, error) hears about a message or webhook item that threw; it must not log values.
+export function createRelay({ store, sender, config, now = Date.now, onError = () => {} }) {
   const getAccount = (number) => store.get('account:' + number);
   const putAccount = (account) => store.put('account:' + account.number, account);
+  // The account's balance as it stands now, for the daemon's Settings; null when there's no account.
+  const balanceOf = async (number) => {
+    const account = number ? await getAccount(number) : null;
+    return account ? account.balance : null;
+  };
 
   function statusMsg(machine, account) {
     if (machine && machine.number && account) {
@@ -79,6 +94,7 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     let m = await store.get('machine:' + keyHash);
     if (!m) m = { keyHash, machine, number: null, linkedAt: null, linkAttempts: [] };
     else if (machine) m.machine = machine;
+    m.lastSeen = now(); // the sweep forgets unlinked machines that stop saying hello
     await store.put('machine:' + keyHash, m);
     const account = m.number ? await getAccount(m.number) : null;
     const out = [statusMsg(m, account)];
@@ -141,16 +157,18 @@ export function createRelay({ store, sender, config, now = Date.now }) {
   const promptKey = (ref) => 'prompt:' + ref;
   const pendingKey = (keyHash, pendingId) => `pending:${keyHash}:${pendingId}`;
 
+  // Replies carry the balance after the send, so Settings shows what the prompt cost.
   async function sendPrompt(keyHash, msg) {
     const { pendingId, prompt } = msg;
-    const failed = (reason) => [{ type: 'prompt-failed', pendingId, reason }];
     const m = await store.get('machine:' + keyHash);
     const account = m && m.number ? await getAccount(m.number) : null;
+    const failed = async (reason) => [{ type: 'prompt-failed', pendingId, reason, balanceMicroUsd: await balanceOf(account && m.number) }];
+    const sentOk = async () => [{ type: 'prompt-sent', pendingId, balanceMicroUsd: await balanceOf(m.number) }];
     if (!account) return failed('not-linked');
     if (typeof pendingId !== 'string' || !pendingId || !validPrompt(prompt)) return failed('send-failed');
     // A repeat of a prompt still open or deciding is already on the phone: no second send or charge.
     const existing = await promptFor(keyHash, pendingId);
-    if (existing && existing.state !== 'closed') return [{ type: 'prompt-sent', pendingId }];
+    if (existing && existing.state !== 'closed') return sentOk();
     const t = now();
     const expiresAt = Math.min(Number.isFinite(msg.expiresAt) ? msg.expiresAt : Infinity, t + MAX_PROMPT_MS);
     const ref = newRef();
@@ -165,7 +183,24 @@ export function createRelay({ store, sender, config, now = Date.now }) {
       await closeIfOpen(ref, 'send-failed');
       return failed(res.reason);
     }
-    return [{ type: 'prompt-sent', pendingId }];
+    return sentOk();
+  }
+
+  // A prompt that threw part-way is closed if it got stored, so a repeat of its pendingId is sent
+  // afresh and a tap on it gets "Too late", and the daemon hears that it failed.
+  async function sendPromptSafely(keyHash, msg) {
+    try {
+      return await sendPrompt(keyHash, msg);
+    } catch (e) {
+      onError('prompt', e);
+      try {
+        const p = typeof msg.pendingId === 'string' ? await promptFor(keyHash, msg.pendingId) : undefined;
+        if (p && p.state === 'open') await close(p, 'error');
+      } catch (e2) {
+        onError('prompt clean-up', e2);
+      }
+      return errorReplies(msg);
+    }
   }
 
   // Every close goes through here. Prompt text and answers aren't kept once a prompt closes; only
@@ -179,10 +214,18 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     await store.put(promptKey(p.ref), p);
   }
 
-  // Re-reads the prompt, since a send may have let another event change it.
+  // Re-reads the prompt, since a send may have let another event change it. True if this closed it.
   async function closeIfOpen(ref, why) {
     const p = await store.get(promptKey(ref));
-    if (p && p.state === 'open') await close(p, why);
+    if (!p || p.state !== 'open') return false;
+    await close(p, why);
+    return true;
+  }
+
+  // The daemon's copy of a prompt that died after it was accepted: the next question couldn't be
+  // sent, or Meta reported a message of it failed. Queued until the prompt's own expiry.
+  async function failedRoute(p, reason) {
+    return { keyHash: p.keyHash, msg: { type: 'prompt-failed', pendingId: p.pendingId, reason, balanceMicroUsd: await balanceOf(p.number) }, expiresAt: p.expiresAt };
   }
 
   async function promptFor(keyHash, pendingId) {
@@ -197,10 +240,12 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     return [];
   }
 
+  // A decide the daemon refused (the hook had just gone, usually) closes as 'refused': it and any
+  // later tap get "Too late".
   async function decideAck(keyHash, msg) {
     const p = await promptFor(keyHash, msg.pendingId);
     if (!p || p.state !== 'deciding') return [];
-    await close(p, msg.ok === true ? 'answered-phone' : 'gone');
+    await close(p, msg.ok === true ? 'answered-phone' : 'refused');
     if (msg.ok !== true) await sendAndSave(p.number, textMessage(p.number, TOO_LATE));
     return [];
   }
@@ -210,7 +255,7 @@ export function createRelay({ store, sender, config, now = Date.now }) {
       case 'hello': return hello(keyHash, { machine: msg.machine, version: msg.version });
       case 'link-start': return linkStart(keyHash, msg);
       case 'unlink': return unlink(keyHash);
-      case 'prompt': return sendPrompt(keyHash, msg);
+      case 'prompt': return sendPromptSafely(keyHash, msg);
       case 'prompt-closed': return promptClosed(keyHash, msg);
       case 'decide-ack': return decideAck(keyHash, msg);
       default: return [];
@@ -276,7 +321,8 @@ export function createRelay({ store, sender, config, now = Date.now }) {
   async function late(p) {
     if (p.state === 'deciding' || p.closedWhy === 'answered-phone') return true;
     if (p.state === 'open' && now() <= p.expiresAt) return false;
-    const body = p.state === 'closed' && p.closedWhy === 'answered' ? ALREADY : TOO_LATE;
+    const closed = p.state === 'closed';
+    const body = closed && p.closedWhy === 'answered' ? ALREADY : closed && p.closedWhy === 'gone' ? CLOSED_HERE : TOO_LATE;
     await sendAndSave(p.number, textMessage(p.number, body));
     return true;
   }
@@ -284,10 +330,11 @@ export function createRelay({ store, sender, config, now = Date.now }) {
   async function decide(p, decision) {
     p.state = 'deciding';
     await store.put(promptKey(p.ref), p);
-    return [{ keyHash: p.keyHash, msg: { type: 'decide', pendingId: p.pendingId, decision }, expiresAt: p.expiresAt }];
+    return [{ keyHash: p.keyHash, msg: { type: 'decide', pendingId: p.pendingId, decision, balanceMicroUsd: await balanceOf(p.number) }, expiresAt: p.expiresAt }];
   }
 
   // Records the current question's answer, then sends the next question or decides with all of them.
+  // A next question that can't be sent closes the prompt, and the daemon is told.
   async function answer(p, value) {
     const qs = p.prompt.questions;
     p.answers[qs[p.qIndex].question] = value;
@@ -295,7 +342,7 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     p.qIndex++;
     await store.put(promptKey(p.ref), p);
     const res = await sendAndSave(p.number, promptMessage(p.number, p.ref, p.prompt, p.qIndex), { ref: p.ref, qIndex: p.qIndex });
-    if (!res.ok) await closeIfOpen(p.ref, 'send-failed');
+    if (!res.ok && (await closeIfOpen(p.ref, 'send-failed'))) return [await failedRoute(p, res.reason)];
     return [];
   }
 
@@ -345,10 +392,11 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     return answer(p, typedAnswer(p.prompt.questions[p.qIndex], text));
   }
 
-  // A Meta "failed" status refunds that message once.
-  async function refund(id) {
+  // A Meta "failed" status refunds that message once. If the message belonged to a prompt that is
+  // still open, the phone never got it: the prompt closes and its daemon is told.
+  async function failedStatus(id) {
     const rec = await store.get('msg:' + id);
-    if (!rec || rec.refunded) return;
+    if (!rec || rec.refunded) return [];
     const account = await getAccount(rec.number);
     if (account) {
       account.balance += rec.price;
@@ -356,33 +404,47 @@ export function createRelay({ store, sender, config, now = Date.now }) {
     }
     rec.refunded = true;
     await store.put('msg:' + id, rec);
+    if (!rec.ref) return [];
+    const p = await store.get(promptKey(rec.ref));
+    return p && (await closeIfOpen(p.ref, 'send-failed')) ? [await failedRoute(p, 'send-failed')] : [];
   }
 
+  async function inboundItem(item) {
+    if (await store.get('seen:' + item.id)) return [];
+    await store.put('seen:' + item.id, now());
+    const account = await getAccount(item.from);
+    if (account) {
+      // Webhooks can arrive out of order: an older message never shortens the window.
+      account.windowUntil = Math.max(account.windowUntil || 0, item.ts + config.windowMs);
+      await putAccount(account);
+    }
+    if (item.buttonId) return handleTap(item);
+    const text = typeof item.text === 'string' ? item.text.trim() : '';
+    if (account && account.machines.length && text.toLowerCase() === 'stop') return handleStop(account);
+    const code = findCode(text);
+    const linked = code ? await handleCode(item, code) : null;
+    if (linked) return linked;
+    return account && text ? handleText(item, text) : [];
+  }
+
+  // Each item is handled on its own, so one that throws doesn't lose the routes of the others.
   async function webhook(parsed) {
     const routes = [];
     for (const item of (parsed && parsed.inbound) || []) {
-      if (await store.get('seen:' + item.id)) continue;
-      await store.put('seen:' + item.id, now());
-      const account = await getAccount(item.from);
-      if (account) {
-        account.windowUntil = item.ts + config.windowMs;
-        await putAccount(account);
+      try {
+        routes.push(...(await inboundItem(item)));
+      } catch (e) {
+        onError('webhook message', e);
       }
-      if (item.buttonId) {
-        routes.push(...(await handleTap(item)));
-        continue;
-      }
-      const text = typeof item.text === 'string' ? item.text.trim() : '';
-      if (account && account.machines.length && text.toLowerCase() === 'stop') {
-        routes.push(...(await handleStop(account)));
-        continue;
-      }
-      const code = findCode(text);
-      const linked = code ? await handleCode(item, code) : null;
-      if (linked) routes.push(...linked);
-      else if (account && text) routes.push(...(await handleText(item, text)));
     }
-    for (const s of (parsed && parsed.statuses) || []) if (s.status === 'failed') await refund(s.id);
+    for (const s of (parsed && parsed.statuses) || []) {
+      if (s.status !== 'failed') continue;
+      try {
+        routes.push(...(await failedStatus(s.id)));
+      } catch (e) {
+        onError('webhook status', e);
+      }
+    }
     return routes;
   }
 
@@ -392,7 +454,15 @@ export function createRelay({ store, sender, config, now = Date.now }) {
   // get "Too late", then go with their pending key, unless a newer prompt has taken that key over.
   // Returns counts only, for the log.
   async function sweep(nowMs = now()) {
-    const counts = { closed: 0, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 0 };
+    const counts = { closed: 0, prompts: 0, codes: 0, seen: 0, msgs: 0, outbox: 0, machines: 0 };
+    // A machine that never linked (or unlinked) and hasn't said hello for 30 days goes, with its
+    // outbox. A linked one stays: its number owns it.
+    for (const [key, m] of await store.list('machine:')) {
+      if (!m || m.number || m.lastSeen >= nowMs - MACHINE_IDLE_MS) continue;
+      await store.delete(key);
+      await store.delete('outbox:' + key.slice('machine:'.length));
+      counts.machines++;
+    }
     for (const p of (await store.list('prompt:')).values()) {
       if ((p.state === 'open' || p.state === 'deciding') && p.expiresAt < nowMs) {
         await close(p, 'timeout');
