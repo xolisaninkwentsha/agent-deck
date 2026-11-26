@@ -1,4 +1,4 @@
-# Agent Deck: handoff notes
+# Modisa: handoff notes
 
 Written at the end of the chat session that built v0.1.0, for the Claude Code session that continues it, and kept up to date since.
 
@@ -11,15 +11,15 @@ The user runs several Claude Code sessions at once on an **Ubuntu desktop** (GNO
 ## Architecture (read README.md for usage)
 
 - `src/hook.mjs`: Claude Code runs it for every hook event (`node hook.mjs observe|decide`). It POSTs `{mode, event, input, meta:{ts, pid: ppid, tmuxPane, termProgram}}` to `127.0.0.1:<port>/hook`, starts the daemon if the connection is refused, and always exits 0. In `decide` mode it prints the daemon's JSON answer.
-- `src/daemon.mjs`: one per machine, port 47615. Keeps session state (`src/state.mjs` turns events into status/step/steps/tasks/background/subagents), streams snapshots to panels over WebSocket `/ws`, and holds `decide` requests until a panel answers, or `holdSeconds` (300) passes, or the panel clicks "Terminal". Then it returns no output, so Claude Code shows its normal prompt. It finds the real Claude PID by walking `ps` up from the hook's parent and marks sessions ended when that PID dies. It persists to `~/.agent-deck/state.json`. Remote panels need `token` (set by `agent-deck share`), and `/hook` accepts loopback only.
-- `src/agents.mjs` + `clients/python/agent_deck.py`: service agents (long-running non-Claude-Code agents) report over `POST /agent`; the panel shows them in an "Agents" section. See "Service agents" below.
+- `src/daemon.mjs`: one per machine, port 47615. Keeps session state (`src/state.mjs` turns events into status/step/steps/tasks/background/subagents), streams snapshots to panels over WebSocket `/ws`, and holds `decide` requests until a panel answers, or `holdSeconds` (300) passes, or the panel clicks "Terminal". Then it returns no output, so Claude Code shows its normal prompt. It finds the real Claude PID by walking `ps` up from the hook's parent and marks sessions ended when that PID dies. It persists to `~/.modisa/state.json`. Remote panels need `token` (set by `modisa share`), and `/hook` accepts loopback only.
+- `src/agents.mjs` + `clients/python/modisa.py`: service agents (long-running non-Claude-Code agents) report over `POST /agent`; the panel shows them in an "Agents" section. See "Service agents" below.
 - `src/otlp.mjs`: a dependency-free OTLP (protobuf + JSON) decoder for the OpenTelemetry receiver on 127.0.0.1:4318. See "OpenTelemetry receiver" below.
 - `src/subagents.mjs`: reads a session's `subagents/` folder (each subagent's transcript and meta file) for the activity window. See "Panel redesign and activity window" below.
 - `src/tailscale.mjs`: Tailscale identity (`status`, `whois`) for pairing machines without tokens. See P2 item 13.
 - `src/claude-sessions.mjs`: reads Claude Code's own `~/.claude/sessions/<pid>.json` (session id, folder, title, busy/idle/waiting) and transcript tails. The daemon uses it to show sessions without hooks (watch-only) and to confirm prompts answered in the terminal. See P1 item 6.
-- `src/install.mjs`: merges hooks into `~/.claude/settings.json` (backup first, idempotent, only touches entries containing `# agent-deck`). Observe hooks are `async: true`. Decide hooks (timeout 600) are `PermissionRequest` (all tools) and `PreToolUse` matcher `AskUserQuestion`. The daemon answers a question on the PermissionRequest for AskUserQuestion when the hook input's `permission_mode` is default/acceptEdits/plan/auto (verified live; the terminal shows the question at the same time). In any other mode it answers on PreToolUse, which keeps the question out of the terminal while held (`questionHookFor` in `daemon.mjs`).
+- `src/install.mjs`: merges hooks into `~/.claude/settings.json` (backup first, idempotent, only touches entries containing `# modisa`). Observe hooks are `async: true`. Decide hooks (timeout 600) are `PermissionRequest` (all tools) and `PreToolUse` matcher `AskUserQuestion`. The daemon answers a question on the PermissionRequest for AskUserQuestion when the hook input's `permission_mode` is default/acceptEdits/plan/auto (verified live; the terminal shows the question at the same time). In any other mode it answers on PreToolUse, which keeps the question out of the terminal while held (`questionHookFor` in `daemon.mjs`).
 - `widget/`: the Electron panel (`main.cjs`, `preload.cjs`, `renderer.js`, `style.css`, plus `shared.js` with Bolt and the DOM helper), the activity window (`activity.html`/`.js`/`.css`, `activity-preload.cjs`) and the icons (`icons/`, drawn by `icons/make-icons.cjs`). It's frameless, always on top, 360px wide, and its height follows the content. It connects to the local daemon plus `hubs` from config. All session text goes in via `textContent` (no HTML injection).
-- `bin/agent-deck.mjs`: the CLI (`install`, `widget`, `autostart`, `status`, `share`/`unshare`, `add-hub`, `start`/`stop`/`restart`, `uninstall`).
+- `bin/modisa.mjs`: the CLI (`install`, `widget`, `autostart`, `status`, `share`/`unshare`, `add-hub`, `start`/`stop`/`restart`, `uninstall`).
 - Tests: `npm test` (end-to-end checks: hook script → daemon → fake WebSocket panel, covering approvals, "Always", deny, question answers on both hooks, release to terminal, hold timeout, background tasks, subagents, approvals off). `node test/demo.mjs` feeds fake sessions. `bash test/try-display.sh` tries different Linux display modes.
 
 Hook formats were taken from https://code.claude.com/docs/en/hooks (Claude Code 2.1.33x):
@@ -30,9 +30,9 @@ Hook formats were taken from https://code.claude.com/docs/en/hooks (Claude Code 
 
 ## Ubuntu fixes already applied on this machine
 
-1. Ubuntu 24.04 blocks unprivileged user namespaces, so Electron aborts unless `node_modules/electron/dist/chrome-sandbox` is `root:root` with mode `4755`. This was done with sudo. **It must be redone after any reinstall of node_modules.** `agent-deck widget` detects and explains this.
-2. The GPU process crashed (`MESA-LOADER: failed to open dri_gbm.so: Permission denied`, exit 139), so the window was never drawn and stayed invisible. `widget/main.cjs` now, on Linux: asks for `ozone-platform=x11` (XWayland, so always-on-top can work), disables hardware acceleration, and adds `disable-gpu-sandbox` + `in-process-gpu`. Of the four modes `test/try-display.sh` tried, this was the clean one. The panel now shows. Overrides: `AGENT_DECK_GPU=1` and `AGENT_DECK_WAYLAND=1`. **Correction (2026-11-25):** `appendSwitch('ozone-platform')` from inside `main.cjs` has no effect in Electron 45, and the panel was really running as a native Wayland client (connected to `wayland-0`, absent from `xwininfo`). See P0 item 3.
-3. Files edited by the chat session lost their executable bit. `bin/agent-deck.mjs` must be `chmod +x` (it's npm-linked as `agent-deck`).
+1. Ubuntu 24.04 blocks unprivileged user namespaces, so Electron aborts unless `node_modules/electron/dist/chrome-sandbox` is `root:root` with mode `4755`. This was done with sudo. **It must be redone after any reinstall of node_modules.** `modisa widget` detects and explains this.
+2. The GPU process crashed (`MESA-LOADER: failed to open dri_gbm.so: Permission denied`, exit 139), so the window was never drawn and stayed invisible. `widget/main.cjs` now, on Linux: asks for `ozone-platform=x11` (XWayland, so always-on-top can work), disables hardware acceleration, and adds `disable-gpu-sandbox` + `in-process-gpu`. Of the four modes `test/try-display.sh` tried, this was the clean one. The panel now shows. Overrides: `MODISA_GPU=1` and `MODISA_WAYLAND=1`. **Correction (2026-11-25):** `appendSwitch('ozone-platform')` from inside `main.cjs` has no effect in Electron 45, and the panel was really running as a native Wayland client (connected to `wayland-0`, absent from `xwininfo`). See P0 item 3.
+3. Files edited by the chat session lost their executable bit. `bin/modisa.mjs` must be `chmod +x` (it's npm-linked as `modisa`).
 
 The daemon is running and **already tracking real sessions**. Be careful when restarting it: a restart drops pending approvals back to the terminal, which is harmless but worth knowing. Don't remove or rewrite the user's own hooks in `~/.claude/settings.json`. If AgentPulse was installed earlier, its hooks may also be in that file; leave them unless the user says otherwise.
 
@@ -45,26 +45,26 @@ The daemon is running and **already tracking real sessions**. Be careful when re
 The rest: the P2 list (installers, security) and item 9's notification click, which the user never confirmed.
 
 ### P0: verify with real sessions (only simulated so far)
-1. ~~**Approval round-trip with a live session**~~ **Verified 2026-11-25** with Claude Code 2.1.332, an interactive session in `--permission-mode default` (hook input `permission_mode: "default"`), an isolated daemon (`AGENT_DECK_HOME`/`AGENT_DECK_PORT` set on the session, so hooks went to it) and a second panel driven over the DevTools protocol (`--remote-debugging-port`, its own `--user-data-dir`). Results:
+1. ~~**Approval round-trip with a live session**~~ **Verified 2026-11-25** with Claude Code 2.1.332, an interactive session in `--permission-mode default` (hook input `permission_mode: "default"`), an isolated daemon (`MODISA_HOME`/`MODISA_PORT` set on the session, so hooks went to it) and a second panel driven over the DevTools protocol (`--remote-debugging-port`, its own `--user-data-dir`). Results:
    - **Allow**: the card appears about 1 s after the tool call. The click reaches Claude Code within 1 ms of the daemon's decision, and the terminal shows "Allowed by PermissionRequest hook".
-   - **Deny**: Claude receives `Denied from Agent Deck.` and carries on with the turn; Stop fires.
+   - **Deny**: Claude receives `Denied from Modisa.` and carries on with the turn; Stop fires.
    - **Always**: for `node -e ...` the suggestion was `addRules` with `destination: "localSettings"`. Claude Code wrote the exact command to `<project>/.claude/settings.local.json`, and the next identical call produced no PermissionRequest. The terminal's own option offers a broader prefix (`node *`), so the panel's "Always" is narrower than the terminal's. For `touch` the suggestions were `addDirectories` + `setMode acceptEdits`, both `destination: "session"`, so "Always" changes only that session's mode. `~/.claude/settings.json` was never touched.
    - **Terminal** and **timeout**: both hand back with no output, the terminal prompt is still there, and answering it works.
    - **Important finding: Claude Code shows its normal permission dialog in the terminal *while* the PermissionRequest hook is held.** Panel and terminal race, so the hold does not block someone at the terminal for approvals. But: answering **Yes** in the terminal does *not* cancel the hook (the card kept live Allow/Deny buttons for an already-answered request until the hold expired, and a click on it did nothing). Answering **No/Esc** kills the hook and is followed by no other event (only `[Request interrupted by user for tool use]` in the transcript), so the card stayed "Needs approval" until the next prompt. Both are fixed under item 4.
-   - Dev aid added: `AGENT_DECK_EVENT_LOG=/path.jsonl` on the daemon appends every raw hook payload.
+   - Dev aid added: `MODISA_EVENT_LOG=/path.jsonl` on the daemon appends every raw hook payload.
 2. ~~**Question round-trip**~~ **Verified 2026-11-25** (same setup as item 1). What Claude received, from the transcript:
    - Single-select: `"Pick a colour"="Green"`.
    - Multi-select + "Other" in one call: `"Which toppings?"="Cheese, Mushrooms", "Which size?"="Medium please"`.
    - Answering on PreToolUse suppresses the terminal dialog; no PermissionRequest follows.
    - **Terminal** / timeout: Claude Code then sends a *PermissionRequest* for AskUserQuestion (not held twice), shows the question in the terminal, and about 6 s later a `Notification` `permission_prompt` "Claude needs your permission". That Notification is what mislabelled a real session's card as "approval" while it was really a question (fixed under item 4).
-   - **Plan approval** (`ExitPlanMode`, input `{plan, planFilePath}`, no suggestions): Allow → "User has approved your plan", and Claude returns to the mode it was in *before* plan mode (default → default, acceptEdits → acceptEdits). The terminal offers "Yes, and use auto mode" / "Yes, manually approve edits", so the panel can't pick a mode yet. Deny → Claude gets `Denied from Agent Deck.` as an error, stays in plan mode and re-presents. Also confirmed in a real session: the user approved a plan from the panel at 13:28 SAST.
+   - **Plan approval** (`ExitPlanMode`, input `{plan, planFilePath}`, no suggestions): Allow → "User has approved your plan", and Claude returns to the mode it was in *before* plan mode (default → default, acceptEdits → acceptEdits). The terminal offers "Yes, and use auto mode" / "Yes, manually approve edits", so the panel can't pick a mode yet. Deny → Claude gets `Denied from Modisa.` as an error, stays in plan mode and re-presents. Also confirmed in a real session: the user approved a plan from the panel at 13:28 SAST.
    - **Questions block the terminal on PreToolUse**: while the PreToolUse hook is held the terminal shows only "running PreToolUse hooks…" and no question, so someone at the terminal waits for the whole hold. **Changed:** the daemon now answers on the **PermissionRequest** for AskUserQuestion, and the question appears in the terminal *and* the panel at once. Verified live: single- and multi-select in default, acceptEdits, plan and auto mode. Other modes keep the PreToolUse route. `bypassPermissions` is not verified (the auto-mode classifier refused to start a bypass session for testing); a person running one could check it.
    - Bug found and fixed: after typing an "Other" answer and pressing Enter, the panel stopped updating (render skipped rebuilding while an answer box had focus, and the box kept focus). The renderer now always rebuilds and restores focus/caret to the same answer box if its question is still open; only an IME composition defers the rebuild.
 3. **Always-on-top on GNOME Wayland via XWayland** (2026-11-25):
    - **Found:** the panel was a native Wayland client, because `app.commandLine.appendSwitch('ozone-platform','x11')` is too late in Electron 45. GNOME ignores always-on-top for Wayland clients.
    - **Fixed:**
-     - `agent-deck widget` and autostart pass `--ozone-platform=x11` on the command line.
-     - `main.cjs` restarts itself once with the flag if launched without it. `app.relaunch()` does nothing before "ready", so it spawns the new process directly, guarded by `AGENT_DECK_RELAUNCHED`.
+     - `modisa widget` and autostart pass `--ozone-platform=x11` on the command line.
+     - `main.cjs` restarts itself once with the flag if launched without it. `app.relaunch()` does nothing before "ready", so it spawns the new process directly, guarded by `MODISA_RELAUNCHED`.
      - **Dragged positions were never saved on Linux:** the code listened for `moved`, which Electron only emits on macOS/Windows (`@platform darwin,win32`). It now saves on `move` (debounced, ignoring the first second after showing).
      - The height change uses `setSize`, not `setBounds({...getBounds()})`, so it never writes a position back.
      - Commit 102e9a7 also moved the panel to its saved spot after showing, because it seemed to open in the wrong place. That was the user dragging the test panel while I measured: geometry sampled every 100 ms showed the window at exactly the requested spot at 212 ms, then a smooth drag. So mutter does honour the requested position, and the workaround was removed.
@@ -107,9 +107,9 @@ The rest: the P2 list (installers, security) and item 9's notification click, wh
 **P0 live on this machine (14:27 SAST, 2026-11-25):** with the user's OK, the daemon was restarted on the new code (hold 300 s, 3 sessions restored) and the panel relaunched through XWayland. Smoke test: a throwaway session reported to the real daemon, the user clicked Allow on its card in the real panel, and Claude Code ran the command ("Allowed by PermissionRequest hook").
 
 **How the live checks were run.** This is now committed as `test/live/` (`live.sh` + README, dev-only; the terminal driver is Python). Nothing is installed system-wide:
-- An isolated daemon: `AGENT_DECK_HOME=<scratch> AGENT_DECK_EVENT_LOG=<scratch>/events.jsonl node src/daemon.mjs`, with `port`/`holdSeconds` in `<scratch>/config.json`.
-- A second panel: `AGENT_DECK_HOME=<scratch> agent-deck widget --user-data-dir=<scratch>/electron --remote-debugging-port=9339`. Its own profile avoids the single-instance lock, and it was driven over the DevTools protocol (`Runtime.evaluate` to click, `Page.captureScreenshot`).
-- An interactive `claude --permission-mode default` in a pty, with `AGENT_DECK_HOME`/`AGENT_DECK_PORT` set so its hooks go to the isolated daemon and `CLAUDE*` variables removed. It was run by a small Python pexpect + pyte driver that renders the screen to a file and takes keystrokes from command files.
+- An isolated daemon: `MODISA_HOME=<scratch> MODISA_EVENT_LOG=<scratch>/events.jsonl node src/daemon.mjs`, with `port`/`holdSeconds` in `<scratch>/config.json`.
+- A second panel: `MODISA_HOME=<scratch> modisa widget --user-data-dir=<scratch>/electron --remote-debugging-port=9339`. Its own profile avoids the single-instance lock, and it was driven over the DevTools protocol (`Runtime.evaluate` to click, `Page.captureScreenshot`).
+- An interactive `claude --permission-mode default` in a pty, with `MODISA_HOME`/`MODISA_PORT` set so its hooks go to the isolated daemon and `CLAUDE*` variables removed. It was run by a small Python pexpect + pyte driver that renders the screen to a file and takes keystrokes from command files.
 - Ground truth was the session transcript (`tool_result`) and the rendered terminal, not panel state.
 - Starting a `bypassPermissions` session that way is refused by the auto-mode classifier, so a person has to check that mode.
 
@@ -147,9 +147,9 @@ The rest: the P2 list (installers, security) and item 9's notification click, wh
    - 3 new e2e checks.
 8. ~~**Tray icon**, **global shortcut**, Esc~~ **Done 2026-11-25.**
    - **Tray:** Electron `Tray`, shown via Ubuntu's AppIndicator extension. Menu: show/hide, "Answer approvals here" (kept in sync with the shield), quit.
-   - **Control socket:** `~/.agent-deck/panel.sock` (0600) for `agent-deck toggle|show|hide`. A hidden panel stays hidden across relaunches, but only when a tray or shortcut can bring it back.
+   - **Control socket:** `~/.modisa/panel.sock` (0600) for `modisa toggle|show|hide`. A hidden panel stays hidden across relaunches, but only when a tray or shortcut can bring it back.
    - **Esc** collapses the panel.
-   - **Shortcut:** Ctrl+Alt+A, the user's choice. GNOME 46 has no GlobalShortcuts portal, and an XWayland grab only fires while an X11 window has focus. So `agent-deck shortcut` adds a GNOME custom keybinding running `agent-deck toggle`, and the panel's own `globalShortcut` is off while `shortcutVia: gnome` (otherwise one press would toggle twice). On this machine it was added with the user's OK.
+   - **Shortcut:** Ctrl+Alt+A, the user's choice. GNOME 46 has no GlobalShortcuts portal, and an XWayland grab only fires while an X11 window has focus. So `modisa shortcut` adds a GNOME custom keybinding running `modisa toggle`, and the panel's own `globalShortcut` is off while `shortcutVia: gnome` (otherwise one press would toggle twice). On this machine it was added with the user's OK.
    - **Verified on the harness panel:**
      - tray item registered (StatusNotifierWatcher 4 → 5);
      - toggle → IsUnMapped / IsViewable;
@@ -206,14 +206,14 @@ Long-running agents that aren't Claude Code sessions: for example an agent that 
   - `POST /agent`, loopback only, at most 64 KB, answers at once;
   - agents persisted in `state.json` and sent in snapshots;
   - liveness checked each housekeeping tick;
-  - `refreshSchedules` reads `crontab -l` (or `AGENT_DECK_CRONTAB`) every minute and on `start`;
+  - `refreshSchedules` reads `crontab -l` (or `MODISA_CRONTAB`) every minute and on `start`;
   - `dismiss-agent`.
 - **Panel:**
   - an "Agents" section below the sessions (square avatars, status, current job/step or next run, waiting count, last job);
-  - expanded: waiting links opened through main's `open-link` (http/https only; `AGENT_DECK_NO_OPEN` logs instead), recent jobs, last error, schedule, heartbeat;
+  - expanded: waiting links opened through main's `open-link` (http/https only; `MODISA_NO_OPEN` logs instead), recent jobs, last error, schedule, heartbeat;
   - notifications for not responding, errors and new waiting items (a click opens the link);
   - collapsed dots and the header light include agents.
-- **`clients/python/agent_deck.py`** (stdlib, 85 lines including its usage docstring):
+- **`clients/python/modisa.py`** (stdlib, 85 lines including its usage docstring):
   - a bounded queue with a sender thread and an `atexit` flush (≤ 1 s);
   - the job context manager re-raises the agent's own exception (`sys.exit(0)` counts as ok).
 - **Tests** (40 checks):
@@ -243,20 +243,20 @@ S3. **Panel "Agents" section**, separate from the Claude Code sessions.
    - **Approvals stay in the agent's chat.** The panel only links there and never approves anything for these agents.
 
 S4. **Tiny clients**, one per language the agents use (about 40 lines, no dependencies):
-   - API: `deck.start()`, `deck.heartbeat()` on a background timer, `deck.job(name)` as a context manager, `deck.step()`, `deck.waiting(id, title, link)`, `deck.resolved(id)`, `deck.error()`.
+   - API: `agent.start()`, `agent.heartbeat()` on a background timer, `agent.job(name)` as a context manager, `agent.step()`, `agent.waiting(id, title, link)`, `agent.resolved(id)`, `agent.error()`.
    - It must never raise or block the agent. If the daemon is down, it drops events silently.
 
 **Hardening done 2026-11-25:**
 - `start` keeps running jobs and `lastError`, and counts restarts.
 - New `waiting_set` replaces the list.
 - Jobs with no end expire after `agentJobMaxHours`.
-- Client: the `AGENT_DECK_DISABLE` off switch, failure summaries are the exception type only, `timer=False` for loop-driven heartbeats, `waiting_set`.
+- Client: the `MODISA_DISABLE` off switch, failure summaries are the exception type only, `timer=False` for loop-driven heartbeats, `waiting_set`.
 
 **S5 (wiring real agents): done 2026-11-25** for the user's own two agents, over OpenTelemetry, by another Claude Code session working in their repos. Details are in `HANDOFF.private.md`. **Still to check:** a real running job, a posted approval list, and the token counts on the cards.
 
-**When wiring any agent** (these apply equally to `agent_deck.py` and OpenTelemetry):
+**When wiring any agent** (these apply equally to `modisa.py` and OpenTelemetry):
 - **Metadata only.** Waiting titles are short and name the kind of item only (e.g. "Approve supplier bill", "Send draft"): **no amounts, names or email text**, plus the link.
-- **Don't edit a deployed working tree.** If the agent runs from a checkout (cron, systemd), a branch switch, edit or pull there is a deploy. Work in a separate clone with its own environment, run only its tests (with `AGENT_DECK_DISABLE=1`), and leave merging, deploying and restarting to the user.
+- **Don't edit a deployed working tree.** If the agent runs from a checkout (cron, systemd), a branch switch, edit or pull there is a deploy. Work in a separate clone with its own environment, run only its tests (with `MODISA_DISABLE=1`), and leave merging, deploying and restarting to the user.
 - **Heartbeat from the loop.** In the long-running loop use `start(heartbeat=60, timer=False)` + `heartbeat()` from the loop, so a hung loop shows "not responding". Report `waiting_set` from the agent's durable list of open asks, if it has one.
 - **Back-off trap.** If the loop backs off after errors (say up to 30 × 20 s), a heartbeat only in the loop body stalls for 10 minutes and shows "Not responding". Beat inside the back-off sleep too (sleep in short steps and beat each step).
 - **Shared entry point trap.** If the watcher and the cron jobs all start as `python -m <pkg> <cmd>`, register the heartbeat (the OTel counter, or `start()`) only in the watcher's command, never in shared setup. Otherwise each cron run counts as a restart, and two overlapping runs read as a crash loop.
@@ -289,17 +289,17 @@ The user asked for any agent that exports OTLP to show in the panel. Design rule
     - The decoder now reads `aggregation_temporality`.
     - For delta, alive = increase > 0, and only a new `service.instance.id` is a restart (the Python SDK sets one per process; a delta counter with no increments exports no point at all).
     - Re-checked live on the harness: working with 0 restarts; a hung loop → not responding; 4 starts → "Restarting repeatedly".
-  - **Wake from suspend.** A gap of more than 30 s (`AGENT_DECK_WAKE_GAP_MS`) since the daemon last ran moves every agent's heartbeat clock on by the gap (never past now), so waking doesn't flag every agent. `wakeClock` in `agents.mjs` is checked on every tick, snapshot and agent event, because timers pause during a real suspend and a snapshot can go out before the next tick.
+  - **Wake from suspend.** A gap of more than 30 s (`MODISA_WAKE_GAP_MS`) since the daemon last ran moves every agent's heartbeat clock on by the gap (never past now), so waking doesn't flag every agent. `wakeClock` in `agents.mjs` is checked on every tick, snapshot and agent event, because timers pause during a real suspend and a snapshot can go out before the next tick.
     - e2e covers the tick path with `SIGSTOP`/`SIGCONT`, plus the clock directly.
     - `SIGSTOP` can't reproduce the snapshot-first ordering: the monotonic clock keeps running, so the overdue tick runs first. That path is covered by the direct clock test and by reading the code, not end to end.
   - **Logs.** A bad body is logged by error class only, because a JSON parse error quotes the start of the body. The same applies to the panel's parse errors.
   - **Test ports.** e2e never picks ports that land on 47615 (your daemon) or 47690 (the harness).
   - **Fixtures.** `make_fixtures.py delta` → `metrics-delta.bin`. `make_json_fixtures.mjs` records `traces/metrics/logs.json` from the official JS SDK (3.1.1, exporters 0.301.2) with its OTLP/JSON exporter, so the JSON path is checked against real exporter output too. Both decoded with no changes needed.
 - **Other names (added 2026-11-25).** Agents that wrap their work differently are read as they are: `job <name>` spans are jobs, and model or tool calls inside an unfinished job span keep that job running even without `job.name`; an `agent.watcher.heartbeat` counter is a heartbeat; `approval.posted` events (`approval.kind`, `chat.thread`) are waiting items, trimmed by an `agent.approvals.waiting` gauge.
-- **For new agents:** standard OpenTelemetry (see README) works instead of, or as well as, `agent_deck.py`. The "When wiring any agent" notes above still apply.
+- **For new agents:** standard OpenTelemetry (see README) works instead of, or as well as, `modisa.py`. The "When wiring any agent" notes above still apply.
 
 ### Panel redesign, activity window and GitHub (added and done 2026-11-25)
-- **GitHub:** public repo `xolisaninkwentsha/agent-deck`.
+- **GitHub:** public repo `xolisaninkwentsha/modisa`.
   - Each change goes on its own branch with a PR, and CI runs `npm test` on it (`.github/workflows/test.yml`). **The user approves every merge**, then the panel (and the daemon when its code changed) restarts.
   - **History was rewritten on 2026-11-25** before the repo stayed public: earlier versions of this file (which held private notes) were removed from every commit, and commit emails now use the GitHub noreply address. The first PRs (#1–#13) live in a private archive, so "Merge pull request #N" in old commit messages refers to those, not to this repo's PRs.
   - Commit with the noreply address (set in the checkout's local git config) so the work email doesn't come back.
@@ -327,18 +327,18 @@ The user asked for any agent that exports OTLP to show in the panel. Design rule
 - **Still to do here:**
   1. **Plans in the activity window:** the session's plan with its steps ticked off (the user asked for "plan and subagent activity"). Built 2026-11-25: the task list with ticks, and the latest plan from plan mode (approved, rejected or proposed).
   2. **Check the agents' cards on real work:** a running job, waiting items, tokens.
-  3. **The Mac** needs the reset above, then `agent-deck restart`.
+  3. **The Mac** needs the reset above, then `modisa restart`.
   4. **One unexplained e2e failure** in seven runs (an unlabelled assertion). Labelled since; CI should catch it if it comes back.
 
 ### P2: second machine, packaging, polish
-13. **MacBook**: `git clone https://github.com/xolisaninkwentsha/agent-deck`, then `npm install && npm link && agent-deck install && agent-deck widget`. Test remote approvals. On macOS the panel uses `floating` level and `setVisibleOnAllWorkspaces`, which is untested on a real Mac.
+13. **MacBook**: `git clone https://github.com/xolisaninkwentsha/modisa`, then `npm install && npm link && modisa install && modisa widget`. Test remote approvals. On macOS the panel uses `floating` level and `setVisibleOnAllWorkspaces`, which is untested on a real Mac.
     - **Done 2026-11-25:**
       - Tailscale is up on the Ubuntu machine.
       - The live daemon is shared on its Tailscale address only, plus 127.0.0.1. Over Tailscale it needs the token (no token or a wrong one is refused); the LAN address isn't bound; `/hook` and `/agent` are 403 from outside.
     - **Other machines in the panel (no terminal):**
       - **Settings → Other machines:** paste the share line into any field and it fills in the name, address and token. Add and Remove are validated by `config.addHub`, the same as the CLI (e2e check).
       - **Settings → Share this machine** (switch):
-        - It runs `agent-deck share <Tailscale IP>` / `unshare` through Electron's built-in Node (`ELECTRON_RUN_AS_NODE`), so the restarted daemon runs on that until the next `agent-deck restart`.
+        - It runs `modisa share <Tailscale IP>` / `unshare` through Electron's built-in Node (`ELECTRON_RUN_AS_NODE`), so the restarted daemon runs on that until the next `modisa restart`.
         - If the machine has no Tailscale address, it shows an error and points to the CLI for a LAN.
         - Copy line is done in main, so the page never sees the token.
         - The CLI's `restart`/`share` now wait for the old daemon to exit instead of a fixed 400 ms.
@@ -355,9 +355,9 @@ The user asked for any agent that exports OTLP to show in the panel. Design rule
         - The asker ticks "both ways" next to Connect; only then does it send `shared: true`.
         - The watched machine's card then offers "Also show its sessions here". The box is hidden when that address is already a hub, because adding it again would replace a working token entry.
         - On Allow with the box ticked, the response carries back: true, and only then does the asker's panel send allow-device (checked with whois).
-      - **What Allow grants:** trust goes to the device, so anything running on it can connect. A secret issued at Allow and stored in the hub entry would narrow that to Agent Deck; not done.
+      - **What Allow grants:** trust goes to the device, so anything running on it can connect. A secret issued at Allow and stored in the hub entry would narrow that to Modisa; not done.
       - **Tests:**
-        - e2e: a fake `tailscale` (`AGENT_DECK_TAILSCALE`) covers whois failure, garbage output, another user and tagged devices, nobody to approve, the remote panel's decide being ignored, no leak to remote panels, token-free entry, Remove, and Deny plus the cooldown. Two deliberate breakages were caught by those tests.
+        - e2e: a fake `tailscale` (`MODISA_TAILSCALE`) covers whois failure, garbage output, another user and tagged devices, nobody to approve, the remote panel's decide being ignored, no leak to remote panels, token-free entry, Remove, and Deny plus the cooldown. Two deliberate breakages were caught by those tests.
         - Harness with **real** Tailscale (this machine pairing with itself over its Tailscale address): card, Allow, token-free connect, Remove → 401.
         - **Mac ↔ Ubuntu:** the user has since connected the two, and Ubuntu's panel shows the Mac's sessions. **Still to check step by step:** the asking side (Connect, the panel's `pair` handler, a successful probe) hasn't run end to end, and neither has finding the Tailscale CLI on macOS (if Settings there says "Tailscale isn't running", the lookup in `src/tailscale.mjs` missed it).
       - Assumes both machines use the same port (47615).
@@ -374,7 +374,7 @@ The user asked for any agent that exports OTLP to show in the panel. Design rule
     - Our own clients send no web Origin: `hook.mjs`, the Python client, Node `fetch`/`WebSocket`, and the `ws` package. The Electron panel was checked to still connect.
     - **Agents** are capped at 100; one not heard from in 30 days is dropped. Covered by e2e checks.
 
-## What Tablo has that Agent Deck doesn't (as of Nov 2026; github.com/aristocrat71/tablo, MIT, Tauri + Svelte)
+## What Tablo has that Modisa doesn't (as of Nov 2026; github.com/aristocrat71/tablo, MIT, Tauri + Svelte)
 - Session discovery by **tailing transcripts** (no restart needed), with activity windows and clear/restore timers
 - **Context-window meters** (auto-detects standard or 1M window, LED bar, warning threshold, animates when context is compacted)
 - **Codex and OpenCode** support
@@ -384,7 +384,7 @@ The user asked for any agent that exports OTLP to show in the panel. Design rule
 - Tab-precise **jump** for Terminal.app, iTerm2 and Ghostty on macOS
 - One-line installers with checksum verification, and **auto-update**
 
-## What Agent Deck has that Tablo doesn't
+## What Modisa has that Tablo doesn't
 - **Answering questions** (AskUserQuestion) and plan approval from the panel
 - **Several machines in one panel** (`share` / `add-hub`, token-protected)
 - **Background tasks and subagents** per session, and task progress (x/y)

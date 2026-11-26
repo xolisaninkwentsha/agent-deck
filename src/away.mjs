@@ -34,9 +34,9 @@ const gdbus = (dest, objectPath, method) =>
   run('gdbus', ['call', '--session', '--dest', dest, '--object-path', objectPath, '--method', method]);
 
 async function readState() {
-  if (process.env.AGENT_DECK_AWAY_FILE) {
+  if (process.env.MODISA_AWAY_FILE) {
     try {
-      const j = JSON.parse(fs.readFileSync(process.env.AGENT_DECK_AWAY_FILE, 'utf8'));
+      const j = JSON.parse(fs.readFileSync(process.env.MODISA_AWAY_FILE, 'utf8'));
       return {
         idleMs: Number.isFinite(j?.idleMs) ? j.idleMs : null,
         locked: typeof j?.locked === 'boolean' ? j.locked : null,

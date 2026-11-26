@@ -1,4 +1,4 @@
-// Agent Deck panel UI. All text from sessions is inserted with textContent, never as HTML.
+// Modisa panel UI. All text from sessions is inserted with textContent, never as HTML.
 'use strict';
 
 const STATUS_LABEL = {
@@ -91,7 +91,7 @@ function settingsView() {
       select(c.notifyAfterSeconds, [[10, '10 s'], [30, '30 s'], [60, '1 min'], [120, '2 min']], (v) => saveSetting({ notifyAfterSeconds: v }), ' s')),
     row('Context warning at', null, select(c.contextWarnPercent, [[70, '70%'], [80, '80%'], [90, '90%']], (v) => saveSetting({ contextWarnPercent: v }), '%')),
     row('Theme', null, select(c.theme || 'system', [['system', 'System'], ['dark', 'Dark'], ['light', 'Light']], (v) => saveSetting({ theme: v }))),
-    row('Show/hide shortcut', linuxNoGnome ? 'Run "agent-deck shortcut" so it works in every app' : null,
+    row('Show/hide shortcut', linuxNoGnome ? 'Run "modisa shortcut" so it works in every app' : null,
       h('span', { class: 'set-value', text: c.shortcut ? prettyKey(c.shortcut) + (c.shortcutVia === 'gnome' ? ' (GNOME)' : '') : 'none' })),
     ...phoneView(row),
     ...machinesView(row));
@@ -154,7 +154,7 @@ function phoneView(row) {
     if (ms > 0) {
       out.push(h('div', { class: 'set-row phone-code' },
         h('div', { class: 'code', text: ph.code.code }),
-        h('div', { class: 'set-hint', text: 'Send this code to the Agent Deck bot on WhatsApp within 10 minutes' }),
+        h('div', { class: 'set-hint', text: 'Send this code to the Modisa bot on WhatsApp within 10 minutes' }),
         h('div', { class: 'set-hint code-left', 'data-expires': ph.code.expiresAt, text: codeLeftText(ms) }),
         h('div', { class: 'btns' },
           bot ? h('button', { class: 'btn allow', text: 'Open WhatsApp', onclick: () => window.deck.openLink('https://wa.me/' + bot + '?text=' + encodeURIComponent(ph.code.code)) }) : null,
@@ -170,7 +170,7 @@ function phoneView(row) {
     out.push(h('div', { class: 'set-row add-hub' },
       h('div', { class: 'set-label' },
         h('div', { text: 'Get approvals on WhatsApp' }),
-        h('div', { class: 'set-hint', text: 'Enter your number, then send the code we give you to the Agent Deck bot.' }),
+        h('div', { class: 'set-hint', text: 'Enter your number, then send the code we give you to the Modisa bot.' }),
         h('div', { class: 'add-fields' }, h('input', {
           class: 'set-input', 'data-field': 'phone-number', placeholder: '+27 82 123 4567', value: d.number, spellcheck: 'false', autocomplete: 'off', inputmode: 'tel',
           oninput: (e) => { d.number = e.target.value; },
@@ -195,13 +195,13 @@ function phoneView(row) {
 
 // Other machines whose sessions and agents this panel shows ("hubs"), and how to share this one.
 // The typed form lives in state.hubDraft, so a settings rebuild doesn't lose it.
-const ADD_HUB_LINE = /^\s*(?:agent-deck\s+add-hub\s+)?([A-Za-z0-9._-]+)\s+(wss?:\/\/\S+)\s+(\S+)\s*$/;
+const ADD_HUB_LINE = /^\s*(?:modisa\s+add-hub\s+)?([A-Za-z0-9._-]+)\s+(wss?:\/\/\S+)\s+(\S+)\s*$/;
 function machinesView(row) {
   const d = state.hubDraft;
   const field = (key, placeholder) => h('input', {
     class: 'set-input', 'data-field': key, placeholder, value: d[key], spellcheck: 'false', autocomplete: 'off',
     oninput: (e) => {
-      const line = ADD_HUB_LINE.exec(e.target.value); // the whole line from "agent-deck share" pasted anywhere
+      const line = ADD_HUB_LINE.exec(e.target.value); // the whole line from "modisa share" pasted anywhere
       if (line) {
         [d.name, d.address, d.token] = line.slice(1);
         for (const k of ['name', 'address', 'token']) document.querySelector(`.set-input[data-field="${k}"]`).value = d[k];
@@ -219,14 +219,14 @@ function machinesView(row) {
     h('div', { class: 'set-row add-hub' },
       h('div', { class: 'set-label' },
         h('div', { text: 'Add a machine' }),
-        h('div', { class: 'set-hint', text: 'Paste the line "agent-deck share" printed on it, or fill in its name, address and token.' }),
+        h('div', { class: 'set-hint', text: 'Paste the line "modisa share" printed on it, or fill in its name, address and token.' }),
         h('div', { class: 'add-fields' }, field('name', 'name'), field('address', 'address, e.g. 100.101.102.103'), field('token', 'token')),
         d.error ? h('div', { class: 'set-error', text: d.error }) : null),
       h('button', { class: 'btn allow', text: 'Add', onclick: addMachine })),
     h('div', { class: 'set-row' },
       h('div', { class: 'set-label' },
         h('div', { text: 'Share this machine' }),
-        h('div', { class: 'set-hint', text: d.sharing ? 'Restarting Agent Deck\'s daemon…'
+        h('div', { class: 'set-hint', text: d.sharing ? 'Restarting Modisa\'s daemon…'
           : shared ? `Shared on ${shared}. Copy the line and paste it into the other panel's "Add a machine".`
             : 'Lets your other computers\' panels see this one, over Tailscale. Restarts the daemon: a prompt the panel is holding goes back to the terminal.' }),
         d.shareError ? h('div', { class: 'set-error', text: d.shareError }) : null),
@@ -279,10 +279,10 @@ function tailscaleRows(row) {
     const hint = !d.online ? 'offline'
       : d.added ? 'added'
         : waiting ? `waiting for Allow on ${d.dns}…`
-          : d.agentDeck ? 'Agent Deck is shared there'
-            : d.outdated ? 'Agent Deck there is older: git pull and restart it there'
-              : 'Agent Deck not found: turn on "Share this machine" there';
-    const connectable = d.online && d.agentDeck && !d.added && !waiting;
+          : d.modisa ? 'Modisa is shared there'
+            : d.outdated ? 'Modisa there is older: git pull and restart it there'
+              : 'Modisa not found: turn on "Share this machine" there';
+    const connectable = d.online && d.modisa && !d.added && !waiting;
     rows.push(row(d.dns, err && err !== 'waiting' ? err : hint, connectable ? h('div', { class: 'connect' },
       // Offer the other way round only when you tick it (and this machine is shared, so it could connect).
       state.cfg.shareAddress ? h('label', { class: 'pair-back', title: `Also let ${d.dns} see this machine` },
@@ -304,7 +304,7 @@ function notifyPairRequests(hub) {
   for (const r of hub.pairRequests) {
     if (state.seenPairs.has(r.id)) continue;
     state.seenPairs.add(r.id);
-    window.deck.notify(`${r.name} wants to see this machine`, 'Open Agent Deck to allow or deny it.', {});
+    window.deck.notify(`${r.name} wants to see this machine`, 'Open Modisa to allow or deny it.', {});
   }
 }
 // "Also show its sessions here" only when that machine is shared and not already in this panel
@@ -688,7 +688,7 @@ function card({ hub, s }) {
         progressRow(s)),
       h('div', { class: 'side' },
         multi ? h('span', { class: 'host', text: hub.name }) : null,
-        s.watchOnly ? h('span', { class: 'watch', text: 'watch only', title: 'Started before Agent Deck\'s hooks were installed. Restart the session to answer from here.' }) : null,
+        s.watchOnly ? h('span', { class: 'watch', text: 'watch only', title: 'Started before Modisa\'s hooks were installed. Restart the session to answer from here.' }) : null,
         modeBadge(s.permissionMode),
         h('div', { class: 'side-btns' },
           h('button', { class: 'icon small', title: 'Subagents and activity', html: ICONS.tree, onclick: (e) => { e.stopPropagation(); openActivity(hub, s); } }),
@@ -838,8 +838,8 @@ function render() {
     } else {
       const anyConnected = state.hubs.some((x) => x.connected);
       const sessionsPart = items.length ? items.map(card) : [h('div', { class: 'empty' },
-        anyConnected ? 'No Claude Code sessions yet.' : 'Connecting to the Agent Deck daemon…',
-        h('div', { class: 'hint', text: anyConnected ? 'Start one with "claude"; running sessions show up within a few seconds.' : 'Run "agent-deck start" if this doesn\'t clear.' }))];
+        anyConnected ? 'No Claude Code sessions yet.' : 'Connecting to the Modisa daemon…',
+        h('div', { class: 'hint', text: anyConnected ? 'Start one with "claude"; running sessions show up within a few seconds.' : 'Run "modisa start" if this doesn\'t clear.' }))];
       // Service agents get their own section below the Claude Code sessions.
       const agentsPart = agentItems.length ? [h('div', { class: 'section-head', text: 'Agents' }), ...agentItems.map(agentCard)] : [];
       list.replaceChildren(...sessionsPart, ...agentsPart);
@@ -893,7 +893,7 @@ setInterval(() => {
 document.getElementById('btn-approvals').addEventListener('click', toggleApprovals);
 document.getElementById('btn-collapse').addEventListener('click', () => { state.collapsed = !state.collapsed; render(); });
 document.getElementById('btn-close').innerHTML = ICONS.close;
-document.getElementById('btn-close').title = 'Quit Agent Deck (to only hide it: Ctrl+Alt+A or the tray icon)';
+document.getElementById('btn-close').title = 'Quit Modisa (to only hide it: Ctrl+Alt+A or the tray icon)';
 document.getElementById('btn-close').addEventListener('click', () => window.deck.quit());
 // Esc collapses the panel (leaving an answer box first if one has focus).
 document.addEventListener('keydown', (e) => {

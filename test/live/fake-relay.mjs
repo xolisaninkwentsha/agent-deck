@@ -1,5 +1,5 @@
 // A fake relay for the live harness (dev only): node test/live/fake-relay.mjs <port>
-// Point the harness daemon at it with AGENT_DECK_RELAY=ws://127.0.0.1:<port>/link.
+// Point the harness daemon at it with MODISA_RELAY=ws://127.0.0.1:<port>/link.
 //   hello      -> a linked status for a key it linked earlier in this run, else unlinked
 //   link-start -> a link-code, then ~3 s later a linked status (as if you had sent the code)
 //   prompt     -> prompt-sent

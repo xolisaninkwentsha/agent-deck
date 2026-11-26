@@ -1,5 +1,5 @@
 // Service agents: long-running programs that aren't Claude Code sessions (e.g. finance-agent).
-// They report to the daemon over POST /agent ({agent, event, ...}); see clients/python/agent_deck.py.
+// They report to the daemon over POST /agent ({agent, event, ...}); see clients/python/modisa.py.
 // This module only keeps their state; the daemon does the I/O.
 
 export const AGENT_STATUS = {

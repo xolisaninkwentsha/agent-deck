@@ -147,7 +147,7 @@ function render() {
   const counts = document.getElementById('a-counts');
   if (!d || d.gone) {
     counts.replaceChildren();
-    tree.replaceChildren(h('div', { class: 'a-empty', text: d?.gone ? 'This session has ended.' : ui.connected ? 'Reading the session…' : 'Connecting to Agent Deck…' }));
+    tree.replaceChildren(h('div', { class: 'a-empty', text: d?.gone ? 'This session has ended.' : ui.connected ? 'Reading the session…' : 'Connecting to Modisa…' }));
     return;
   }
   const n = (st) => d.agents.filter((a) => a.status === st).length;

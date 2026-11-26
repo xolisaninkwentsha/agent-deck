@@ -1,7 +1,7 @@
-# Agent Deck's phone-approvals relay: one Worker and one SQLite-backed Durable Object.
+# Modisa's phone-approvals relay: one Worker and one SQLite-backed Durable Object.
 # Secrets and operator values are set with `npx wrangler secret put <NAME>`, never in this file.
 # See README.md.
-name = "agent-deck-relay"
+name = "modisa-relay"
 main = "src/worker.js"
 compatibility_date = "2026-11-20"
 

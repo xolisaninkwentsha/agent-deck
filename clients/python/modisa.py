@@ -1,23 +1,23 @@
-"""Report a long-running agent to Agent Deck (the always-on-top panel for agents on this machine).
+"""Report a long-running agent to Modisa (the always-on-top panel for agents on this machine).
 
-    from agent_deck import Deck
-    deck = Deck("finance-agent")
-    deck.start("Billing, collections and supplier bills", heartbeat=60, timer=False)  # long-running process
-    ...in its main loop: deck.heartbeat()                # timer=False: a hung loop shows "not responding"
-    with deck.job("daily", "morning run") as job:        # job_start / job_end; failure = exception type only
-        deck.step("Matching payments")
-        deck.waiting("bill-42", "Approve supplier bill", "https://chat.google.com/...")
+    from modisa import Agent
+    agent = Agent("finance-agent")
+    agent.start("Billing, collections and supplier bills", heartbeat=60, timer=False)  # long-running process
+    ...in its main loop: agent.heartbeat()                # timer=False: a hung loop shows "not responding"
+    with agent.job("daily", "morning run") as job:        # job_start / job_end; failure = exception type only
+        agent.step("Matching payments")
+        agent.waiting("bill-42", "Approve supplier bill", "https://chat.google.com/...")
         job.summary = "3 reminders sent"
-    deck.resolved("bill-42")
-    deck.waiting_set([("bill-43", "Approve supplier bill", link)])  # the full open list; replaces it
-    deck.error("Xero sign-in expired")
+    agent.resolved("bill-42")
+    agent.waiting_set([("bill-43", "Approve supplier bill", link)])  # the full open list; replaces it
+    agent.error("Xero sign-in expired")
 
 Keep titles and messages short and free of names, amounts and email text: they are stored by
 the panel, shown in desktop notifications and on any machine the panel is shared with.
 
-Never raises and never blocks: events are queued and posted to the local Agent Deck daemon
-(127.0.0.1) by a background thread; if it isn't running they're dropped. AGENT_DECK_DISABLE=1
-(or Deck(..., enabled=False)) turns everything off, e.g. in tests. Standard library only:
+Never raises and never blocks: events are queued and posted to the local Modisa daemon
+(127.0.0.1) by a background thread; if it isn't running they're dropped. MODISA_DISABLE=1
+(or Agent(..., enabled=False)) turns everything off, e.g. in tests. Standard library only:
 copy this file into the agent's repo.
 """
 import atexit, contextlib, json, os, queue, threading, time, urllib.request
@@ -27,18 +27,18 @@ class _Job:
     summary = ""
 
 
-class Deck:
+class Agent:
     def __init__(self, agent, port=None, enabled=None):
         self.agent = agent
-        self.enabled = (os.environ.get("AGENT_DECK_DISABLE", "") in ("", "0")) if enabled is None else bool(enabled)
+        self.enabled = (os.environ.get("MODISA_DISABLE", "") in ("", "0")) if enabled is None else bool(enabled)
         if not self.enabled:
             return
         try:
-            with open(os.path.join(os.environ.get("AGENT_DECK_HOME") or os.path.expanduser("~/.agent-deck"), "config.json")) as f:
+            with open(os.path.join(os.environ.get("MODISA_HOME") or os.path.expanduser("~/.modisa"), "config.json")) as f:
                 cfg = json.load(f)
         except Exception:
             cfg = {}
-        self._url = f"http://127.0.0.1:{int(port or os.environ.get('AGENT_DECK_PORT') or cfg.get('port') or 47615)}/agent"
+        self._url = f"http://127.0.0.1:{int(port or os.environ.get('MODISA_PORT') or cfg.get('port') or 47615)}/agent"
         self._q = queue.Queue(maxsize=500)
         threading.Thread(target=self._pump, daemon=True).start()
         atexit.register(self._flush)  # short cron runs: give the last events up to a second

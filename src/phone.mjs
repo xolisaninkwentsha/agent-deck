@@ -79,7 +79,7 @@ function cleanDecision(d) {
 
 export function createPhone({
   home, machineName, log = () => {}, onChange = () => {}, decide, extendHold,
-  relayUrl = process.env.AGENT_DECK_RELAY, WebSocketImpl = WebSocket, now = Date.now, version = '0.1.0',
+  relayUrl = process.env.MODISA_RELAY, WebSocketImpl = WebSocket, now = Date.now, version = '0.1.0',
   handshakeTimeout = 10000, awayAfterMs = AWAY_AFTER_MS,
   // Timings, injectable for tests.
   backoffMinMs = BACKOFF_MIN_MS, backoffMaxMs = BACKOFF_MAX_MS, stableMs = STABLE_MS,

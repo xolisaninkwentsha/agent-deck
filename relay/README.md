@@ -1,12 +1,12 @@
-# Agent Deck relay
+# Modisa relay
 
-The relay lets Agent Deck send approvals and questions to your phone over WhatsApp, and passes your answers back. It is a Cloudflare Worker with one Durable Object:
+The relay lets Modisa send approvals and questions to your phone over WhatsApp, and passes your answers back. It is a Cloudflare Worker with one Durable Object:
 
-- each Agent Deck daemon keeps one outgoing WebSocket to `wss://<worker host>/link`;
+- each Modisa daemon keeps one outgoing WebSocket to `wss://<worker host>/link`;
 - WhatsApp (Meta's Cloud API) calls `https://<worker host>/whatsapp/webhook` when you message the bot or tap a button;
 - `https://<worker host>/health` answers `ok`.
 
-This guide is for running your own relay: your own Cloudflare account, your own Meta app and number, and billing off. Agent Deck has no relay address set until you enter one in Settings, and it only connects to a relay while you're linking a number or a number is linked.
+This guide is for running your own relay: your own Cloudflare account, your own Meta app and number, and billing off. Modisa has no relay address set until you enter one in Settings, and it only connects to a relay while you're linking a number or a number is linked.
 
 ## What you need
 
@@ -24,7 +24,7 @@ npx wrangler login      # once, opens a browser
 npx wrangler deploy
 ```
 
-`deploy` prints the Worker's address, for example `https://agent-deck-relay.<your-subdomain>.workers.dev`. That host is the `<worker host>` used below. Check it:
+`deploy` prints the Worker's address, for example `https://modisa-relay.<your-subdomain>.workers.dev`. That host is the `<worker host>` used below. Check it:
 
 ```sh
 curl https://<worker host>/health    # ok
@@ -46,7 +46,7 @@ Required (the webhook and `/link` answer "relay is not configured" until all six
 | `WA_PHONE_NUMBER_ID` | The bot number's Phone number ID, from WhatsApp → API Setup. This is an id, not the phone number. Webhook calls for any other number on the same Meta app are ignored. |
 | `WA_APP_SECRET` | Your Meta app's App secret (App settings → Basic). The relay uses it to check that webhook calls really come from Meta. |
 | `WA_VERIFY_TOKEN` | Any long random string you make up, for example the output of `openssl rand -hex 32`. You give the same string to Meta in step 3. |
-| `BOT_NUMBER` | The bot's WhatsApp number with its country code, for example `+1 555 010 0000`. Agent Deck shows it and builds the `wa.me` link from it. |
+| `BOT_NUMBER` | The bot's WhatsApp number with its country code, for example `+1 555 010 0000`. Modisa shows it and builds the `wa.me` link from it. |
 | `GRAPH_VERSION` | The Graph API version to call, as shown in API Setup's sample request (it looks like `v23.0`). |
 
 Optional (leave these unset on your own relay):
@@ -55,7 +55,7 @@ Optional (leave these unset on your own relay):
 | --- | --- | --- |
 | `BILLING` | `off` | `off`, `trial` or `on`. See "Billing" below. |
 | `HOURLY_CAP` | `60` | The most messages the bot sends to one number in any hour. It applies even with billing off, so a runaway session can't flood your phone. |
-| `TEMPLATE_NAME` | `agent_deck_needs_you` | The message template used outside WhatsApp's 24-hour window (step 4). |
+| `TEMPLATE_NAME` | `modisa_needs_you` | The message template used outside WhatsApp's 24-hour window (step 4). |
 | `TEMPLATE_LANG` | `en` | That template's language code. |
 | `TRIAL_MICRO_USD` | `0` | Only with billing on: the starting credit for a new number, in millionths of a US dollar. |
 | `RATES_JSON` | `{"default":0}` | Only with billing on: the cost of one message in micro-USD, by country-code prefix, for example `{"default":10000,"44":9000}`. The longest matching prefix wins. With `BILLING` set to `trial` or `on`, `default` must be above 0. |
@@ -91,9 +91,9 @@ WhatsApp only lets a bot send free-form messages to a number that has messaged i
 In **WhatsApp Manager → Message templates**, create a template:
 
 - **Category:** Utility
-- **Name:** `agent_deck_needs_you`
+- **Name:** `modisa_needs_you`
 - **Language:** English (`en`)
-- **Body:** `Agent Deck: {{1}} needs you: {{2}}. Tap Show to see it.` For the samples Meta asks for, use something like `my-project` and `Run a command`. The relay fills in the project name and a short title.
+- **Body:** `Modisa: {{1}} needs you: {{2}}. Tap Show to see it.` For the samples Meta asks for, use something like `my-project` and `Run a command`. The relay fills in the project name and a short title.
 - **Button:** Quick reply, with the text `Show`
 
 Meta rejects a template body that starts or ends with a variable. If you reword the body, keep some fixed text before `{{1}}` and after `{{2}}`.
@@ -106,15 +106,15 @@ Billing is **off** unless you set `BILLING`, and that is the right setting for y
 
 `trial` and `on` are for a relay that charges the people using it. Each message is then priced from `RATES_JSON` plus `MARKUP_PERCENT`, and skipped when a number's credit can't cover it.
 
-## 5. Point Agent Deck at your relay
+## 5. Point Modisa at your relay
 
-In Agent Deck, open **Settings → Phone (WhatsApp) → Advanced → Relay address**, enter
+In Modisa, open **Settings → Phone (WhatsApp) → Advanced → Relay address**, enter
 
 ```
 wss://<worker host>/link
 ```
 
-and choose **Save**. Then link your number from the same Settings section: Agent Deck shows a code, and you send it to the bot from your phone. Each machine links on its own.
+and choose **Save**. Then link your number from the same Settings section: Modisa shows a code, and you send it to the bot from your phone. Each machine links on its own.
 
 ## Running it locally
 

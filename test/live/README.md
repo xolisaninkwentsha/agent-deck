@@ -4,7 +4,7 @@
 
 - **Daemon**: a separate one on port 47690, with its own home in `test/live/.work/home`. It logs every raw hook payload to `events.jsonl`.
 - **Panel**: a second one with its own Electron profile, driven over the DevTools protocol on port 9339.
-- **Session**: `claude` in a pty, started in `test/live/.work/proj` with `AGENT_DECK_HOME`/`AGENT_DECK_PORT` set, so only its hooks go to the test daemon.
+- **Session**: `claude` in a pty, started in `test/live/.work/proj` with `MODISA_HOME`/`MODISA_PORT` set, so only its hooks go to the test daemon.
 
 Your other sessions keep reporting to your own daemon. The test panel appears on your screen (right side of the main screen, below where your own panel usually sits); leave it alone while a check runs, because a click there answers for real.
 
@@ -47,12 +47,12 @@ Other keys: `send key esc|up|down|tab|shift-tab|enter [times]`, `send text "/exi
 
 | Check | How | Expect |
 | --- | --- | --- |
-| Allow / Deny / Always | `touch` prompt, click `.btn.allow` / `.btn.deny` / the "Always" button | `result` shows the command ran / `Denied from Agent Deck.`; "Always" writes `.work/proj/.claude/settings.local.json` |
+| Allow / Deny / Always | `touch` prompt, click `.btn.allow` / `.btn.deny` / the "Always" button | `result` shows the command ran / `Denied from Modisa.`; "Always" writes `.work/proj/.claude/settings.local.json` |
 | Answer in terminal | hold a prompt, `send key enter` (Yes) or `send key down 3` + `enter` (No) | `state` clears straight away (Yes: on PostToolUse; No: "Interrupted in the terminal") |
 | Terminal then No | click "Terminal", then No in the terminal | cleared from the transcript within ~2 s |
 | Questions | ask for AskUserQuestion, click `.pending .opt` | terminal shows the question at the same time; `result` has the answer |
 | Plan approval | Shift+Tab to plan mode, ask for a plan with ExitPlanMode | Allow returns to the pre-plan mode |
-| Panel on X11 | `xwininfo -root -tree \| grep "Agent Deck"`, `xprop -id <id> _NET_WM_STATE` | listed, `_NET_WM_STATE_ABOVE` |
+| Panel on X11 | `xwininfo -root -tree \| grep "Modisa"`, `xprop -id <id> _NET_WM_STATE` | listed, `_NET_WM_STATE_ABOVE` |
 | Remembered position | `python3 -I test/live/xmove.py <id> 2600 300`, restart the panel | reopens there |
 
 Raw payloads for any event are in `.work/home/events.jsonl`. Starting a `bypassPermissions` session this way may be refused by Claude Code's auto-mode classifier when an agent does it; run that one by hand.

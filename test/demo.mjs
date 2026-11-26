@@ -16,7 +16,7 @@ const hook = (mode, input) => new Promise((resolve) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ev = (id, cwd, event, extra = {}) => hook('observe', { session_id: id, cwd, hook_event_name: event, ...extra });
 
-// Service agents report over POST /agent (what clients/python/agent_deck.py does).
+// Service agents report over POST /agent (what clients/python/modisa.py does).
 const PORT = loadConfig().port;
 const agent = (body) => fetch(`http://127.0.0.1:${PORT}/agent`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {});
 const at = (days, h, m) => { const d = new Date(); d.setDate(d.getDate() + days); d.setHours(h, m, 0, 0); return d.getTime(); };

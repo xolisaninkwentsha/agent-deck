@@ -1,6 +1,6 @@
 node_modules/
 *.log
-agent-deck.gitbundle
+modisa.gitbundle
 test/live/.work/
 test/live/.pylib/
 __pycache__/

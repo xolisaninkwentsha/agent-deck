@@ -16,7 +16,7 @@ import { parseWebhook } from '../relay/src/whatsapp.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Never your own daemon (47615) or the live-test harness (47690).
-const TAKEN = new Set([47615, 47690, Number(process.env.AGENT_DECK_LIVE_PORT) || 0]);
+const TAKEN = new Set([47615, 47690, Number(process.env.MODISA_LIVE_PORT) || 0]);
 const randomPort = () => { let p; do p = 47000 + Math.floor(Math.random() * 900); while (TAKEN.has(p)); return p; };
 
 let passed = 0;
@@ -242,7 +242,7 @@ async function linkRelay(key) {
   return relay;
 }
 
-// A daemon in a throwaway AGENT_DECK_HOME, linked to `relay` through a pre-written phone.json
+// A daemon in a throwaway MODISA_HOME, linked to `relay` through a pre-written phone.json
 // (its key is the one the relay accepts; enabled, "only when I'm away"). No relay: no phone at all.
 const daemons = [];
 async function startDaemon({ name, key, relay, bind, token, env = {} }) {
@@ -258,12 +258,12 @@ async function startDaemon({ name, key, relay, bind, token, env = {} }) {
   d.away = (idleMs) => fs.writeFileSync(awayFile, JSON.stringify({ idleMs, locked: false }));
   d.away(1000);
   d.env = {
-    ...process.env, AGENT_DECK_HOME: home, AGENT_DECK_PORT: String(port), CLAUDE_CONFIG_DIR: claude,
-    AGENT_DECK_CRONTAB: path.join(home, 'crontab'), AGENT_DECK_AWAY_FILE: awayFile, ...env,
+    ...process.env, MODISA_HOME: home, MODISA_PORT: String(port), CLAUDE_CONFIG_DIR: claude,
+    MODISA_CRONTAB: path.join(home, 'crontab'), MODISA_AWAY_FILE: awayFile, ...env,
   };
-  if (relay) d.env.AGENT_DECK_RELAY = relay.url;
-  else delete d.env.AGENT_DECK_RELAY;
-  for (const k of ['AGENT_DECK_DISABLE', 'AGENT_DECK_BIND', 'AGENT_DECK_VERBOSE', 'AGENT_DECK_EVENT_LOG']) delete d.env[k];
+  if (relay) d.env.MODISA_RELAY = relay.url;
+  else delete d.env.MODISA_RELAY;
+  for (const k of ['MODISA_DISABLE', 'MODISA_BIND', 'MODISA_VERBOSE', 'MODISA_EVENT_LOG']) delete d.env[k];
   d.child = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: d.env, stdio: 'ignore' });
   const exited = new Promise((r) => d.child.once('exit', r));
   const running = () => d.child.exitCode === null && d.child.signalCode === null;
@@ -323,7 +323,7 @@ async function daemonChecks() {
   const key = crypto.randomBytes(32).toString('base64url');
   const relay = await linkRelay(key);
   // The 2-minute rule is 1 s here, so the presence check below needn't wait two minutes.
-  const d = await startDaemon({ name: 'phone-box', key, relay, env: { AGENT_DECK_PHONE_AWAY_AFTER_MS: '1000' } });
+  const d = await startDaemon({ name: 'phone-box', key, relay, env: { MODISA_PHONE_AWAY_AFTER_MS: '1000' } });
   const url = `ws://127.0.0.1:${d.port}/ws`;
 
   // Wait for the link through a local panel, then close it: the first checks run with no panel.

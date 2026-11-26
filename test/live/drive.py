@@ -11,7 +11,7 @@ CLAUDE* variables are removed so the session doesn't think it is nested in anoth
 """
 import json, os, sys, time, glob
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.environ.get('AGENT_DECK_LIVE_PYLIB', os.path.join(HERE, '.pylib')))
+sys.path.insert(0, os.environ.get('MODISA_LIVE_PYLIB', os.path.join(HERE, '.pylib')))
 import pexpect, pyte
 
 work, cwd, args = sys.argv[1], sys.argv[2], sys.argv[3:]

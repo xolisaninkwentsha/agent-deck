@@ -1,13 +1,14 @@
-// Adds (or removes) Agent Deck's hooks in Claude Code's user settings.
-// Always backs the file up first and only touches entries that belong to Agent Deck.
+// Adds (or removes) Modisa's hooks in Claude Code's user settings.
+// Always backs the file up first and only touches entries that belong to Modisa.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { OLD_MARK } from './legacy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const HOOK_PATH = path.join(HERE, 'hook.mjs');
-const MARK = 'agent-deck';
+const MARK = 'modisa';
 
 export function settingsPath() {
   const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -38,7 +39,10 @@ const DECIDE = [
   ['PreToolUse', 'AskUserQuestion'],
 ];
 
-const isOurs = (h) => typeof h?.command === 'string' && h.command.includes(MARK) && h.command.includes('hook.mjs');
+// Ours: a hook.mjs command ending in "# modisa" (or the old name's marker). Matched at the
+// end, never as a substring: the folder holding hook.mjs may itself contain either name.
+const OURS = new RegExp(`hook\\.mjs'? (?:observe|decide) # (?:${MARK}|${OLD_MARK})$`);
+const isOurs = (h) => typeof h?.command === 'string' && OURS.test(h.command.trim());
 
 function strip(settings) {
   const hooks = settings.hooks || {};
@@ -64,7 +68,7 @@ function read(file) {
 
 function backup(file) {
   if (!fs.existsSync(file)) return null;
-  const dest = `${file}.agent-deck-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const dest = `${file}.modisa-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   fs.copyFileSync(file, dest);
   return dest;
 }

@@ -2,12 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task by task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Agent Deck users link a phone number and answer Claude Code prompts from WhatsApp buttons while they're away. A hosted relay does the sending, and phase 1 charges trial credit only.
+**Goal:** Modisa users link a phone number and answer Claude Code prompts from WhatsApp buttons while they're away. A hosted relay does the sending, and phase 1 charges trial credit only.
 
 **Architecture:**
 - **The relay** (`relay/`) is a Cloudflare Worker with one Durable Object.
   - Its logic lives in plain-JavaScript modules: a key-value store interface, an injected `fetch` and Web Crypto. So the logic is tested in Node and deployed unchanged.
-  - Each Agent Deck daemon keeps one outgoing WebSocket to the relay (`src/phone.mjs`).
+  - Each Modisa daemon keeps one outgoing WebSocket to the relay (`src/phone.mjs`).
 - **The daemon** decides when a held prompt goes to the phone, masks the text (`src/phone-summary.mjs`) and applies the answer that comes back through the same path as a panel decision.
 - **The panel** gets a "Phone (WhatsApp)" section in Settings, and sends presence to other machines' daemons.
 
@@ -18,7 +18,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-25-phone-approvals-design.md`. Read it first; this plan argues from it.
 
-**Workspace:** a git worktree on branch `phone-approvals` (superpowers:using-git-worktrees). The live panel runs from `~/Desktop/agent-deck`, so don't switch branches there.
+**Workspace:** a git worktree on branch `phone-approvals` (superpowers:using-git-worktrees). The live panel runs from `~/Desktop/modisa`, so don't switch branches there.
 
 ## Global constraints
 
@@ -48,7 +48,7 @@
   - The cap is 60 bot messages per account per rolling hour.
   - Meta "failed" statuses are refunded once.
 - **Never from the phone:** "always" (`decision.always`). The phone can only allow, deny or answer a prompt the daemon sent and that is still open.
-- **Machine key:** 32 random bytes (base64url), stored 0600 in `~/.agent-deck/phone.json` and written atomically. The relay stores only its SHA-256 hex.
+- **Machine key:** 32 random bytes (base64url), stored 0600 in `~/.modisa/phone.json` and written atomically. The relay stores only its SHA-256 hex.
 - **Phase 1:** `BILLING=trial`, no top-ups, and no payment method on the Meta account.
 - **Code rules:**
   - App: plain JavaScript, no build step, no new runtime dependencies.
@@ -95,7 +95,7 @@ eq(maskSecrets('psql postgres://admin:hunter2@db.example.com/app'), `psql postgr
 eq(maskSecrets(`echo '{"api_key": "abc", "name": "x"}'`), `echo '{"api_key": "${M}", "name": "x"}'`);
 eq(maskSecrets('use eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlMTIz now'), `use ${M} now`);
 eq(maskSecrets('ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4'), M);
-for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/agent-deck/node_modules']) eq(maskSecrets(plain), plain);
+for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/modisa/node_modules']) eq(maskSecrets(plain), plain);
 // summaries
 const bash = phoneSummary({ toolName: 'Bash', toolInput: { command: 'TOKEN=abc123 ./x.sh' + ' y'.repeat(400) }, project: 'api' });
 eq(bash.kind, 'approval'); eq(bash.title, 'Run command'); ok(bash.detail.startsWith(`TOKEN=${M}`)); ok(bash.detail.length <= LIMITS.detail);
@@ -143,12 +143,12 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
   - `export async function localAway({ idleAfterMs = 300000 } = {}): Promise<{ away: boolean, known: boolean, idleMs: number|null, locked: boolean|null }>`
     - `away = locked === true || (idleMs ?? 0) >= idleAfterMs`.
     - `known` is false when neither could be read.
-    - If env `AGENT_DECK_AWAY_FILE` is set, it reads `{ idleMs, locked }` JSON from that file on every call instead (for tests).
+    - If env `MODISA_AWAY_FILE` is set, it reads `{ idleMs, locked }` JSON from that file on every call instead (for tests).
 
 - [ ] **Step 1: Write the failing tests.**
   - The three parsers, on the sample strings above.
   - Garbage gives `null`.
-  - `localAway` with `AGENT_DECK_AWAY_FILE` pointing at `{"idleMs":400000,"locked":false}` → `away: true, known: true`.
+  - `localAway` with `MODISA_AWAY_FILE` pointing at `{"idleMs":400000,"locked":false}` → `away: true, known: true`.
   - With `{"idleMs":1000,"locked":false}` → `away: false`.
   - A missing file → `known: false, away: false`.
 - [ ] **Step 2: Run.** `node test/phone-unit.mjs` should fail.
@@ -164,7 +164,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
 ### Task 3: Relay WhatsApp module
 
 **Files:**
-- Create: `relay/package.json` (`{"name":"agent-deck-relay","private":true,"type":"module","devDependencies":{"wrangler":"<current 4.x>"}}`), `relay/src/whatsapp.js`, `test/relay.mjs`
+- Create: `relay/package.json` (`{"name":"modisa-relay","private":true,"type":"module","devDependencies":{"wrangler":"<current 4.x>"}}`), `relay/src/whatsapp.js`, `test/relay.mjs`
 - Modify: `package.json` (append `&& node test/relay.mjs` to `"test"`)
 
 **Interfaces:**
@@ -357,7 +357,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
     - `MARKUP_PERCENT` (0 by default);
     - `HOURLY_CAP` (60 by default);
     - `GRAPH_VERSION` (required, no default);
-    - `TEMPLATE_NAME` (`'agent_deck_needs_you'` by default);
+    - `TEMPLATE_NAME` (`'modisa_needs_you'` by default);
     - `TEMPLATE_LANG` (`'en'` by default).
 
     It throws with the variable's name if a required one is missing.
@@ -377,7 +377,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
       - `prompt:` entries closed more than 1 h ago;
       - `seen:` entries older than 1 day;
       - `msg:` entries older than 7 days.
-  - **`wrangler.toml`:** `name = "agent-deck-relay"`, `main = "src/worker.js"`, a DO binding `RELAY` → `RelayDO`, and a migration `new_sqlite_classes = ["RelayDO"]`. No `[vars]` for operator values.
+  - **`wrangler.toml`:** `name = "modisa-relay"`, `main = "src/worker.js"`, a DO binding `RELAY` → `RelayDO`, and a migration `new_sqlite_classes = ["RelayDO"]`. No `[vars]` for operator values.
 
 - [ ] **Step 1: Write the failing tests:**
   - `parseEnv` defaults;
@@ -387,9 +387,9 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
 - [ ] **Step 3: Implement** `env.js`, `worker.js` and `relay-do.js`, plus `relay/README.md`:
   - deploying your own relay: `npm i`, `npx wrangler deploy`, then `npx wrangler secret put` for each secret and operator value;
   - the Meta app and test number, the webhook URL and the `messages` subscription;
-  - the template `agent_deck_needs_you` (utility; body `Agent Deck: {{1}} needs you: {{2}}. Tap Show to see it.` (Meta rejects a body that starts or ends with a variable); quick reply "Show");
+  - the template `modisa_needs_you` (utility; body `Modisa: {{1}} needs you: {{2}}. Tap Show to see it.` (Meta rejects a body that starts or ends with a variable); quick reply "Show");
   - billing off by default;
-  - Agent Deck → Settings → Relay address.
+  - Modisa → Settings → Relay address.
 - [ ] **Step 4: Check it runs.**
   - `node test/relay.mjs` passes.
   - `cd relay && npm i && npx wrangler dev`, then `curl localhost:8787/health` prints `ok`, and `curl -i localhost:8787/link` returns `401`.
@@ -405,7 +405,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
 - Consumes: `phoneSummary` (Task 1), and the relay protocol (Tasks 5 and 6).
 - Produces:
   - `export const DEFAULT_RELAY_URL = ''` (set in Task 11)
-  - `export function createPhone({ home, machineName, log, onChange, decide, extendHold, relayUrl = process.env.AGENT_DECK_RELAY, WebSocketImpl, now = Date.now }): Phone`
+  - `export function createPhone({ home, machineName, log, onChange, decide, extendHold, relayUrl = process.env.MODISA_RELAY, WebSocketImpl, now = Date.now }): Phone`
     - `decide(pendingId, decision) → { ok: boolean, reason?: string }`
     - `extendHold(pendingId) → void`
   - `Phone` has:
@@ -477,10 +477,10 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
   - **Messages:**
     - `case 'presence'` (any panel): `ws.presence = { active: Boolean(msg.active), at: Date.now() }`.
     - `phone-*` messages are accepted from local panels only.
-  - **Environment for tests:** `AGENT_DECK_RELAY` and `AGENT_DECK_AWAY_FILE`.
+  - **Environment for tests:** `MODISA_RELAY` and `MODISA_AWAY_FILE`.
 
 - [ ] **Step 1: Write the failing tests**, appended to `test/phone.mjs`.
-  - **Setup:** a real daemon in a temp `AGENT_DECK_HOME`, the fake relay (answering `hello` with `status linked:true`), and `hook()` copied from `test/e2e.mjs`. Each check is named as quoted:
+  - **Setup:** a real daemon in a temp `MODISA_HOME`, the fake relay (answering `hello` with `status linked:true`), and `hook()` copied from `test/e2e.mjs`. Each check is named as quoted:
   - **"no panel, away"** (away file idle 400000): a PermissionRequest hook is held, the relay gets `prompt` with masked detail, and the relay's `decide allow` → hook output `behavior: 'allow'`.
   - **"no panel, at desk"** (idle 1000): the hook returns at once with no output, and the relay gets nothing.
   - **"always is ignored":** a relay decide `{behavior:'allow', always:true}` → output has no `updatedPermissions`.
@@ -508,7 +508,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
       - no relay → hint "Needs a relay address (below)";
       - relay unreachable → "Can't reach the relay";
       - not linked → a number input (`state.phoneDraft`) and **Connect** (sends `phone-link` to the local hub);
-      - while a code is shown → the code in large text, "Send this code to the Agent Deck bot on WhatsApp within 10 minutes", **Open WhatsApp** (`window.deck.openLink('https://wa.me/' + botNumber + '?text=' + code)`) and **Cancel**.
+      - while a code is shown → the code in large text, "Send this code to the Modisa bot on WhatsApp within 10 minutes", **Open WhatsApp** (`window.deck.openLink('https://wa.me/' + botNumber + '?text=' + code)`) and **Cancel**.
     - **Once linked:**
       - "Connected" with the masked number;
       - a switch "Phone approvals on this machine";
@@ -522,7 +522,7 @@ eq(q.kind, 'question'); eq(q.questions[0].options, ['Red']);
   - **Settings rebuilds:** like `devicesSig`, a change in the phone view's signature sets `state.settingsDirty`.
 
 - [ ] **Step 1: Check on the harness panel.**
-  - `node test/live/fake-relay.mjs <port>` running, then `test/live/live.sh panel` with `AGENT_DECK_RELAY=ws://127.0.0.1:<port>/link` set for the harness daemon.
+  - `node test/live/fake-relay.mjs <port>` running, then `test/live/live.sh panel` with `MODISA_RELAY=ws://127.0.0.1:<port>/link` set for the harness daemon.
   - `CDP_URL=… node test/live/cdp.mjs` screenshots of: Settings not linked, Settings with a code, Settings linked, and an approval card showing "Sent to your phone".
   - Look at each screenshot in both themes.
 - [ ] **Step 2: Implement**, then re-take the screenshots until all four states read correctly.
@@ -537,13 +537,13 @@ The user's accounts are involved, so **ask the user before each external step.**
   - A Meta app with the WhatsApp product under the operator's business portfolio.
   - The test number, with the user's phone added as a recipient.
   - A permanent system-user token, and the app secret.
-  - The template `agent_deck_needs_you`, submitted for review.
+  - The template `modisa_needs_you`, submitted for review.
   - A payment method stays **off** the account.
 - [ ] **Step 3: Deploy, with the user's OK.**
   - `npx wrangler deploy`.
   - `npx wrangler secret put` for: `WA_TOKEN`, `WA_PHONE_NUMBER_ID`, `WA_APP_SECRET`, `WA_VERIFY_TOKEN`, `BOT_NUMBER`, `BILLING=trial`, `TRIAL_MICRO_USD`, `RATES_JSON`, `MARKUP_PERCENT` (values from `HANDOFF.private.md`), `GRAPH_VERSION` (the current Graph API version).
   - Set the webhook URL to `https://<worker>/whatsapp/webhook` and subscribe to `messages`.
-- [ ] **Step 4: Point Agent Deck at the deployed relay.** Set `DEFAULT_RELAY_URL` in `src/phone.mjs` to `wss://<worker host>/link`. Commit.
+- [ ] **Step 4: Point Modisa at the deployed relay.** Set `DEFAULT_RELAY_URL` in `src/phone.mjs` to `wss://<worker host>/link`. Commit.
 - [ ] **Step 5: Live run on the harness.**
   1. Link the user's number.
   2. Start a real Claude Code session pointed at the harness daemon.

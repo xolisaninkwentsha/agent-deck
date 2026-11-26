@@ -4,22 +4,22 @@ Status: design, 2026-11-25. iMessage is a separate design, after this one ships.
 
 ## Why
 
-Agent Deck users want to answer Claude Code from their phone when they're away from the computer: permission requests, questions and plan approvals, by tapping buttons in WhatsApp.
+Modisa users want to answer Claude Code from their phone when they're away from the computer: permission requests, questions and plan approvals, by tapping buttons in WhatsApp.
 
 Setup must be "type your number, confirm once". Users never touch Meta's developer tools.
 
-Agent Deck is open source, so the relay that talks to WhatsApp is open source too, and anyone can run their own. A hosted relay can also be offered as a paid convenience, priced to cover its costs. The operator's business details are kept out of this public repo.
+Modisa is open source, so the relay that talks to WhatsApp is open source too, and anyone can run their own. A hosted relay can also be offered as a paid convenience, priced to cover its costs. The operator's business details are kept out of this public repo.
 
 ## Goals
 
-- **Connect.** Settings → phone number → Agent Deck shows a code → the user sends the code to the bot on WhatsApp → connected. One number can link several machines.
+- **Connect.** Settings → phone number → Modisa shows a code → the user sends the code to the bot on WhatsApp → connected. One number can link several machines.
 - **Reach the phone.** Prompts go to the phone only when the user is away (rules below). They come with buttons, and a tap answers the held prompt while Claude Code is still waiting.
 - **Prepaid credit.**
   - New numbers get trial credit.
   - Users top up through a checkout link.
   - Each message deducts the operator's cost for the recipient's country, times a markup.
   - At zero nothing is sent, and prompts stay on the panel and in the terminal.
-- **Self-host.** The same relay code runs on anyone's own accounts. Billing can be switched off for self-hosters, and Agent Deck has a relay-address setting.
+- **Self-host.** The same relay code runs on anyone's own accounts. Billing can be switched off for self-hosters, and Modisa has a relay-address setting.
 
 ## Non-goals (this design)
 
@@ -38,7 +38,7 @@ Agent Deck is open source, so the relay that talks to WhatsApp is open source to
 ## Constraints
 
 - **Claude Code's wait.**
-  - Claude Code waits for a hook for at most 600 s (the timeout `agent-deck install` sets).
+  - Claude Code waits for a hook for at most 600 s (the timeout `modisa install` sets).
   - The daemon holds a prompt for `holdSeconds`: default 300, max 570 (`holdFrom` in `src/daemon.mjs`).
   - A question held on PreToolUse is held for at most 90 s (`PRETOOLUSE_HOLD_MS`).
   - A tap after the hold ends is too late; the prompt is back in the terminal.
@@ -63,7 +63,7 @@ Agent Deck is open source, so the relay that talks to WhatsApp is open source to
   - Workers Paid ($5 a month) is the step up if needed.
 - **Payments:**
   - The plan is a merchant of record (MoR), which handles VAT in buyers' countries. Which one is a phase 2 decision.
-- **Agent Deck:** plain JavaScript, no build step, no new runtime dependencies in the app (the daemon already has `ws`). The relay is a separate package in this repo (`relay/`), deployed with Wrangler, and isn't part of the desktop app.
+- **Modisa:** plain JavaScript, no build step, no new runtime dependencies in the app (the daemon already has `ws`). The relay is a separate package in this repo (`relay/`), deployed with Wrangler, and isn't part of the desktop app.
 - **The repo is public.** No operator secrets or business details go in it.
 - **Platforms:** Ubuntu (GNOME on Wayland; the panel runs through XWayland) and macOS.
 
@@ -89,7 +89,7 @@ Who decided what:
 
 - **Relay** (`relay/`, new): a Cloudflare Worker with Durable Objects.
   - `GET|POST /whatsapp/webhook`: Meta's callbacks.
-  - `GET /link` (WebSocket): each Agent Deck daemon keeps one outgoing connection here.
+  - `GET /link` (WebSocket): each Modisa daemon keeps one outgoing connection here.
   - `POST /billing/webhook`: the MoR's callbacks.
   - `GET /top-up`: starts a checkout for an account.
   - **Storage:**
@@ -107,7 +107,7 @@ Who decided what:
 
 ### Linking a number
 
-1. The daemon has a random 32-byte machine key, created on first use and stored 0600 in `~/.agent-deck/`. The relay keeps only a hash of it. The daemon presents it on every connection to the relay.
+1. The daemon has a random 32-byte machine key, created on first use and stored 0600 in `~/.modisa/`. The relay keeps only a hash of it. The daemon presents it on every connection to the relay.
 2. In Settings the user types their number. The daemon sends `link-start {number}`, and the relay returns a code that is single-use and valid for 10 minutes *(call: 8 characters, no lookalikes)*.
 3. The user sends that code to the bot from that number; the wa.me link fills it in.
    - The relay matches the code and the sender's WhatsApp id, links the machine to the number, and replies "Connected: <machine name>".
@@ -175,7 +175,7 @@ Text starts from what the panel already shows (`describeApproval` in `src/state.
 - **The price of a message** is the operator's cost for the recipient's country and that message type (from a rate table the operator keeps up to date from Meta's rate card) times the markup. Both are relay settings, not code.
   - Users pay per message, even when the message fell in Meta's monthly free tier *(call: the free tier pays for the trial credit)*.
 - **Every message the bot sends is charged** to the account at that price *(call)*. That includes prompts, follow-up questions, "Connected", "Too late", "Already answered" and credit notices. Outside the 24-hour window, the template and the full message after it are two charges.
-- **Before each send** the relay checks the balance covers the price. If it doesn't, the message is skipped, never sent at the operator's cost. At zero, Agent Deck shows "Out of phone credit: top up" in Settings and on the card.
+- **Before each send** the relay checks the balance covers the price. If it doesn't, the message is skipped, never sent at the operator's cost. At zero, Modisa shows "Out of phone credit: top up" in Settings and on the card.
 - **Phase 1 (trial credit only)** runs with no payment method on the Meta account. Meta's 1,000 free messages a month are then a hard cap, and the operator pays nothing. If Meta refuses a send because the free tier is used up, the prompt simply stays on the panel and in the terminal.
 - **Warnings:** a low-balance warning at 20% of the last top-up *(call)*. It goes in the next message, or in a confirmation reply while the window is open.
 - **Top-up:** Settings → Top up → the relay creates a checkout for that account, for a fixed pack *(call: 5, 10 or 20 USD)*.
@@ -205,7 +205,7 @@ Text starts from what the panel already shows (`describeApproval` in `src/state.
 - deploying with Wrangler to your own Cloudflare account;
 - creating your own Meta app and number, and the webhook URL;
 - leaving billing off (the default for a self-hosted relay);
-- pointing Agent Deck at it from Settings → Relay address.
+- pointing Modisa at it from Settings → Relay address.
 
 ## Phases
 
@@ -237,6 +237,6 @@ Text starts from what the panel already shows (`describeApproval` in `src/state.
 - which MoR;
 - the code format;
 - the rate-table format;
-- how Agent Deck shows a stale or failed relay link.
+- how Modisa shows a stale or failed relay link.
 
 Operator-specific details (seller, markup, accounts) are in the git-ignored `HANDOFF.private.md`.

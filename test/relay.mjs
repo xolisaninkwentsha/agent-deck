@@ -1138,13 +1138,13 @@ async function main() {
       hourlyCap: 60,
       codeTtlMs: 600000,
       windowMs: 86400000,
-      template: { name: 'agent_deck_needs_you', lang: 'en' },
+      template: { name: 'modisa_needs_you', lang: 'en' },
       whatsapp: { token: 'tok', phoneNumberId: '1234', appSecret: 'sec', verifyToken: 'vt', graphVersion: 'v21.0' },
     });
     const blank = { BILLING: '', TRIAL_MICRO_USD: '', RATES_JSON: '', MARKUP_PERCENT: '', HOURLY_CAP: '', TEMPLATE_NAME: '', TEMPLATE_LANG: '' };
     assert.deepEqual(parseEnv({ ...base, ...blank }), parseEnv(base));
     assert.equal(parseEnv({ ...base, WA_TOKEN: 'tok\n' }).whatsapp.token, 'tok');
-    check('parseEnv defaults: billing off, no trial, zero rates, cap 60, the agent_deck_needs_you template');
+    check('parseEnv defaults: billing off, no trial, zero rates, cap 60, the modisa_needs_you template');
 
     throwsNaming({}, 'GRAPH_VERSION');
     for (const name of ['GRAPH_VERSION', 'WA_TOKEN', 'WA_PHONE_NUMBER_ID', 'WA_APP_SECRET', 'WA_VERIFY_TOKEN', 'BOT_NUMBER']) {

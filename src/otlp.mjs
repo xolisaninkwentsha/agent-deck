@@ -1,7 +1,7 @@
 // Decodes OTLP/HTTP export requests (traces, metrics, logs) from protobuf or JSON into one
 // plain shape. No dependencies: a minimal protobuf wire reader with the field numbers of
 // opentelemetry-proto (checked against the official 1.45 descriptors). Unknown fields are
-// skipped. Log bodies and status messages are never decoded: Agent Deck keeps metadata only.
+// skipped. Log bodies and status messages are never decoded: Modisa keeps metadata only.
 
 const MAX_DEPTH = 8;
 

@@ -1,4 +1,4 @@
-// Agent Deck daemon: one per machine.
+// Modisa daemon: one per machine.
 // - Receives Claude Code hook events from src/hook.mjs on 127.0.0.1:<port>/hook
 // - Keeps a live picture of every session on this machine
 // - Streams it to widgets over WebSocket (/ws), local or remote (remote needs the token)
@@ -46,19 +46,19 @@ let PRETOOLUSE_HOLD_MS = Math.min(HOLD_MS, 90000);
 // while the panel holds it.
 const PERMISSION_REQUEST_QUESTION_MODES = new Set(['default', 'acceptEdits', 'plan', 'auto']);
 const questionHookFor = (input) => (PERMISSION_REQUEST_QUESTION_MODES.has(input.permission_mode) ? 'PermissionRequest' : 'PreToolUse');
-// Development aid: AGENT_DECK_EVENT_LOG=/path.jsonl appends every raw hook payload there.
-const EVENT_LOG = process.env.AGENT_DECK_EVENT_LOG || null;
+// Development aid: MODISA_EVENT_LOG=/path.jsonl appends every raw hook payload there.
+const EVENT_LOG = process.env.MODISA_EVENT_LOG || null;
 
 ensureHome();
 const logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' });
 const log = (...a) => {
   const line = `[${new Date().toISOString()}] ${a.join(' ')}\n`;
   logStream.write(line);
-  if (process.env.AGENT_DECK_VERBOSE) process.stdout.write(line);
+  if (process.env.MODISA_VERBOSE) process.stdout.write(line);
 };
 
 if (!isLoopback(BIND) && !cfg.token) {
-  console.error(`Refusing to listen on ${BIND} without a token. Run "agent-deck share" to set one up.`);
+  console.error(`Refusing to listen on ${BIND} without a token. Run "modisa share" to set one up.`);
   process.exit(1);
 }
 
@@ -78,10 +78,10 @@ const widgets = new Set();
 // mode is "everything" or this machine is away. It connects only while this machine is linked or
 // a link is in progress, so with no relay configured, or never linked, it never connects.
 // Tests only: the "unanswered for 2 minutes" rule, shortened (1 to 120 s; anything else is ignored).
-const awayAfterEnv = Number(process.env.AGENT_DECK_PHONE_AWAY_AFTER_MS);
+const awayAfterEnv = Number(process.env.MODISA_PHONE_AWAY_AFTER_MS);
 const phone = createPhone({
   home: HOME, machineName: NAME, log, onChange: broadcast, decide: phoneDecide, extendHold,
-  relayUrl: process.env.AGENT_DECK_RELAY, version: VERSION,
+  relayUrl: process.env.MODISA_RELAY, version: VERSION,
   awayAfterMs: awayAfterEnv >= 1000 && awayAfterEnv <= 120000 ? awayAfterEnv : undefined,
 });
 const PHONE_HOLD_MS = 570000; // a PermissionRequest sent to the phone is held to createdAt + this
@@ -143,7 +143,7 @@ function scheduleSave() {
 // Nothing can arrive while the machine sleeps, so the agents' heartbeat clocks move on by the
 // time asleep. Timers pause during suspend, so this runs on every tick, snapshot and agent event.
 const TICK_MS = 2000;
-const wake = wakeClock(Number(process.env.AGENT_DECK_WAKE_GAP_MS) || 30000, TICK_MS); // a gap this long = the machine slept
+const wake = wakeClock(Number(process.env.MODISA_WAKE_GAP_MS) || 30000, TICK_MS); // a gap this long = the machine slept
 function checkWake(now = Date.now()) {
   const gap = wake.check(agents.values(), now);
   if (gap) log(`woke after ${Math.round(gap / 1000)} s: agent heartbeat clocks moved on`);
@@ -171,7 +171,7 @@ const allowDevice = (dev) => {
 /** pairing request id -> { id, device, ip, port, shared, back, at, res, timer } */
 const pairRequests = new Map();
 const deniedUntil = new Map(); // device id -> no new request from it until then
-const PAIR_HOLD_MS = Number(process.env.AGENT_DECK_PAIR_HOLD_MS) || 120000;
+const PAIR_HOLD_MS = Number(process.env.MODISA_PAIR_HOLD_MS) || 120000;
 const localPanels = () => [...widgets].filter((w) => w.local && w.readyState === 1);
 function finishPair(r, approved, reason = '') {
   if (!pairRequests.delete(r.id)) return;
@@ -504,7 +504,7 @@ function buildOutput(p, decision) {
     return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', updatedInput } } };
   }
   if (decision.behavior === 'deny') {
-    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: decision.message || 'Denied from Agent Deck.' } } };
+    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message: decision.message || 'Denied from Modisa.' } } };
   }
   const d = { behavior: 'allow' };
   if (toolName === 'ExitPlanMode') d.updatedInput = toolInput || {};
@@ -617,9 +617,9 @@ function handleAgent(body) {
 }
 
 // An agent's cron jobs come from the crontab (the agents don't have to report them), unless
-// the agent sends its own "schedule". AGENT_DECK_CRONTAB=/file reads a file instead (tests).
+// the agent sends its own "schedule". MODISA_CRONTAB=/file reads a file instead (tests).
 function readCrontab() {
-  if (process.env.AGENT_DECK_CRONTAB) return fs.promises.readFile(process.env.AGENT_DECK_CRONTAB, 'utf8').catch(() => '');
+  if (process.env.MODISA_CRONTAB) return fs.promises.readFile(process.env.MODISA_CRONTAB, 'utf8').catch(() => '');
   return new Promise((resolve) => execFile('crontab', ['-l'], { timeout: 3000 }, (err, out) => resolve(err ? '' : out)));
 }
 async function refreshSchedules() {
@@ -827,7 +827,7 @@ setInterval(() => {
     if (a.otlp) {
       if (otlpTick(a, now, { waitingTtlMs: (Number(cfg.otlpWaitingTtlHours) || 168) * 3600 * 1000 })) changed = true;
     } else {
-      const maxJobMs = Number(process.env.AGENT_DECK_JOB_MAX_MS) || (Number(cfg.agentJobMaxHours) || 12) * 3600 * 1000;
+      const maxJobMs = Number(process.env.MODISA_JOB_MAX_MS) || (Number(cfg.agentJobMaxHours) || 12) * 3600 * 1000;
       if (expireJobs(a, now, maxJobMs)) { log(`agent "${a.name}": a job reported no end, marked failed`); changed = true; }
     }
     const st = agentStatus(a, now);
@@ -932,7 +932,7 @@ function handleRequest(req, res) {
 }
 
 // Pairing between your own machines over Tailscale (reachable only while this one is shared).
-// GET: "is Agent Deck here, and am I paired?". POST: ask to be allowed; held until a panel on
+// GET: "is Modisa here, and am I paired?". POST: ask to be allowed; held until a panel on
 // this machine answers (or PAIR_HOLD_MS). Only your own devices get any answer but 403.
 async function handlePair(req, res) {
   const remote = req.socket.remoteAddress;
@@ -941,7 +941,7 @@ async function handlePair(req, res) {
   const dev = await ownDevice(remote);
   if (!dev) { log(`pairing refused from ${plainIp(remote)}: not one of your Tailscale devices`); res.writeHead(403).end(); return; }
   const reply = (o) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ name: NAME, ...o })); };
-  if (req.method === 'GET') { reply({ agentDeck: true, version: VERSION, paired: devices.has(dev.id) }); return; }
+  if (req.method === 'GET') { reply({ modisa: true, version: VERSION, paired: devices.has(dev.id) }); return; }
   let raw = '';
   req.setEncoding('utf8');
   req.on('data', (c) => { raw += c; if (raw.length > 2048) req.destroy(); });
@@ -950,7 +950,7 @@ async function handlePair(req, res) {
   try { body = JSON.parse(raw || '{}'); } catch { res.writeHead(400).end(); return; }
   if (devices.has(dev.id)) { reply({ approved: true }); return; }
   if ((deniedUntil.get(dev.id) || 0) > Date.now()) { reply({ approved: false, reason: 'denied a moment ago; try again in a few minutes' }); return; }
-  if (!localPanels().length) { reply({ approved: false, reason: `no Agent Deck panel is open on ${NAME} to approve it` }); return; }
+  if (!localPanels().length) { reply({ approved: false, reason: `no Modisa panel is open on ${NAME} to approve it` }); return; }
   if (pairRequests.size >= 3 || [...pairRequests.values()].some((x) => x.device.id === dev.id)) { reply({ approved: false, reason: 'a request is already waiting there' }); return; }
   const port = Number.isInteger(body.port) && body.port > 0 && body.port < 65536 ? body.port : PORT;
   const r = { id: crypto.randomUUID(), device: dev, ip: plainIp(remote), port, shared: body.shared === true, at: Date.now(), res };
@@ -1046,7 +1046,7 @@ servers.forEach((srv, i) => {
   srv.listen(PORT, binds[i], () => {
     if (++listening < servers.length) return;
     fs.writeFileSync(PID_PATH, String(process.pid));
-    log(`Agent Deck daemon v${VERSION} "${NAME}" on ${binds.join(' + ')}:${PORT} (hold ${HOLD_MS / 1000}s)`);
+    log(`Modisa daemon v${VERSION} "${NAME}" on ${binds.join(' + ')}:${PORT} (hold ${HOLD_MS / 1000}s)`);
   });
 });
 

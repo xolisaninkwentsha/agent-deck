@@ -5,18 +5,18 @@
 // It never blocks Claude Code on failure: any error means "no opinion".
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolveHome } from './legacy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const HOME = process.env.AGENT_DECK_HOME || path.join(os.homedir(), '.agent-deck');
+const HOME = resolveHome();
 const mode = process.argv[2] === 'decide' ? 'decide' : 'observe';
 
 let port = 47615;
 try { port = JSON.parse(fs.readFileSync(path.join(HOME, 'config.json'), 'utf8')).port || port; } catch {}
-if (process.env.AGENT_DECK_PORT) port = Number(process.env.AGENT_DECK_PORT);
+if (process.env.MODISA_PORT) port = Number(process.env.MODISA_PORT);
 
 function readStdin() {
   return new Promise((resolve) => {

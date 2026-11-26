@@ -71,7 +71,7 @@ export function parseEnv(env) {
     hourlyCap: amount(env, 'HOURLY_CAP', 60),
     codeTtlMs: 600000,
     windowMs: 86400000,
-    template: { name: raw(env, 'TEMPLATE_NAME') ?? 'agent_deck_needs_you', lang: raw(env, 'TEMPLATE_LANG') ?? 'en' },
+    template: { name: raw(env, 'TEMPLATE_NAME') ?? 'modisa_needs_you', lang: raw(env, 'TEMPLATE_LANG') ?? 'en' },
     whatsapp,
   };
 }

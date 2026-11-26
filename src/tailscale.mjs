@@ -8,7 +8,7 @@ import fs from 'node:fs';
 // On macOS the App Store app keeps its CLI inside the bundle.
 const CANDIDATES = ['/usr/bin/tailscale', '/usr/local/bin/tailscale', '/opt/homebrew/bin/tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale'];
 export function tailscaleBin() {
-  if (process.env.AGENT_DECK_TAILSCALE) return process.env.AGENT_DECK_TAILSCALE; // tests: a fake
+  if (process.env.MODISA_TAILSCALE) return process.env.MODISA_TAILSCALE; // tests: a fake
   return CANDIDATES.find((p) => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } }) || null;
 }
 
@@ -21,7 +21,7 @@ function runJson(args) {
   }));
 }
 
-const CACHE_OVERRIDE = process.env.AGENT_DECK_TAILSCALE_CACHE_MS; // tests: "0" (each call asks again)
+const CACHE_OVERRIDE = process.env.MODISA_TAILSCALE_CACHE_MS; // tests: "0" (each call asks again)
 const ttl = (ms) => (CACHE_OVERRIDE !== undefined ? Number(CACHE_OVERRIDE) || 0 : ms);
 const label = (dns) => String(dns || '').split('.')[0]; // "my-macbook.tailnet.ts.net." -> "my-macbook"
 export const plainIp = (addr) => String(addr || '').replace(/^::ffff:/, '');

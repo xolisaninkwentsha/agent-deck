@@ -1,5 +1,5 @@
 // End-to-end test: real hook script -> real daemon -> fake widget over WebSocket.
-// Runs in a throwaway AGENT_DECK_HOME on a spare port.
+// Runs in a throwaway MODISA_HOME on a spare port.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -10,9 +10,9 @@ import WebSocket from 'ws';
 import zlib from 'node:zlib';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-'));
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'modisa-test-'));
 // A spare port, plus PORT+1/+3/+4/+500 below; none may hit your own daemon or the live-test harness.
-const TAKEN = [47615, 47690, Number(process.env.AGENT_DECK_LIVE_PORT) || 0];
+const TAKEN = [47615, 47690, Number(process.env.MODISA_LIVE_PORT) || 0];
 let PORT;
 do PORT = 47000 + Math.floor(Math.random() * 900); while ([0, 1, 3, 4, 500].some((d) => TAKEN.includes(PORT + d)));
 const OTLP_PORT = PORT + 3; // the test daemon's OpenTelemetry receiver (never the real 4318)
@@ -22,8 +22,8 @@ const CLAUDE = path.join(HOME, 'claude');
 fs.mkdirSync(path.join(CLAUDE, 'sessions'), { recursive: true });
 const CRONTAB = path.join(HOME, 'crontab'); // instead of the real `crontab -l`
 fs.writeFileSync(CRONTAB, '');
-const env = { ...process.env, AGENT_DECK_HOME: HOME, AGENT_DECK_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, AGENT_DECK_CRONTAB: CRONTAB, AGENT_DECK_JOB_MAX_MS: '6000', AGENT_DECK_WAKE_GAP_MS: '3000' };
-delete env.AGENT_DECK_DISABLE;
+const env = { ...process.env, MODISA_HOME: HOME, MODISA_PORT: String(PORT), CLAUDE_CONFIG_DIR: CLAUDE, MODISA_CRONTAB: CRONTAB, MODISA_JOB_MAX_MS: '6000', MODISA_WAKE_GAP_MS: '3000' };
+delete env.MODISA_DISABLE;
 const sleepers = []; // stand-ins for running Claude Code processes
 const fakeProcess = () => { const p = spawn('sleep', ['120']); sleepers.push(p); return p; };
 const sessionFile = (pid, fields) => fs.writeFileSync(path.join(CLAUDE, 'sessions', `${pid}.json`), JSON.stringify({ pid, ...fields }));
@@ -520,15 +520,15 @@ async function main() {
   const CLIENT_DIR = path.join(ROOT, 'clients', 'python');
   const py = (code, port) => new Promise((resolve) => {
     const t = Date.now();
-    const p = spawn('python3', ['-I', '-B', '-c', `import sys; sys.path.insert(0, ${JSON.stringify(CLIENT_DIR)})\n${code}`], { env: { ...env, AGENT_DECK_PORT: String(port) } });
+    const p = spawn('python3', ['-I', '-B', '-c', `import sys; sys.path.insert(0, ${JSON.stringify(CLIENT_DIR)})\n${code}`], { env: { ...env, MODISA_PORT: String(port) } });
     let out = '', err = '';
     p.stdout.on('data', (c) => { out += c; });
     p.stderr.on('data', (c) => { err += c; });
     p.on('close', (code) => resolve({ code, out, err, ms: Date.now() - t }));
   });
   const pyAgent = [
-    'from agent_deck import Deck',
-    'd = Deck("py-agent")',
+    'from modisa import Agent',
+    'd = Agent("py-agent")',
     'd.start("from python", heartbeat=0)',
     'with d.job("nightly", "test run") as j:',
     '    d.step("crunching")',
@@ -553,11 +553,11 @@ async function main() {
   assert.equal(r.code, 0, r.err);
   assert.ok(r.ms < 2500, `took ${r.ms} ms`);
   ok('Python client: with no daemon it neither raises nor hangs');
-  r = await py('import os; os.environ["AGENT_DECK_DISABLE"] = "1"\n' + pyAgent.replace('"py-agent"', '"py-off"'), PORT);
+  r = await py('import os; os.environ["MODISA_DISABLE"] = "1"\n' + pyAgent.replace('"py-agent"', '"py-off"'), PORT);
   assert.equal(r.code, 0, r.err);
   await sleep(500);
   assert.equal(ag('py-off'), undefined);
-  ok('Python client: AGENT_DECK_DISABLE=1 sends nothing (for the agents\' own tests)');
+  ok('Python client: MODISA_DISABLE=1 sends nothing (for the agents\' own tests)');
 
   // 9n2. Two kinds of process per agent: a restart of the long-running one must not hide a
   //      cron job mid-run or an error; the full open list replaces drifted items; a job that
@@ -580,7 +580,7 @@ async function main() {
   if (!lan) {
     console.log('  - skipped the remote-request check: no LAN address on this machine');
   } else {
-    const HOME2 = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-deck-test-remote-'));
+    const HOME2 = fs.mkdtempSync(path.join(os.tmpdir(), 'modisa-test-remote-'));
     const PORT2 = PORT + 1;
     fs.writeFileSync(path.join(HOME2, 'config.json'), JSON.stringify({ port: PORT2, bind: lan, token: 'x'.repeat(32), name: 'remote-test', otlpPort: PORT + 4 }));
     // A fake `tailscale` for pairing: answers status/whois from fake-ts.json, which the test rewrites.
@@ -595,7 +595,7 @@ async function main() {
     }));
     const node = (user, extra = {}) => ({ Node: { StableID: 'mac-node', User: user, Name: 'test-mac.tn.ts.net.', Hostinfo: { Hostname: 'Test Mac' }, ...extra }, UserProfile: { ID: user, LoginName: user === 1 ? 'me@example.com' : 'someone@else.com' } });
     fakeTs(null);
-    const d2 = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: { ...env, AGENT_DECK_HOME: HOME2, AGENT_DECK_PORT: String(PORT2), AGENT_DECK_TAILSCALE: FAKE_TS, AGENT_DECK_TAILSCALE_CACHE_MS: '0' } });
+    const d2 = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: { ...env, MODISA_HOME: HOME2, MODISA_PORT: String(PORT2), MODISA_TAILSCALE: FAKE_TS, MODISA_TAILSCALE_CACHE_MS: '0' } });
     try {
       for (let i = 0; i < 40; i++) { try { await fetch(`http://${lan}:${PORT2}/health`); break; } catch { await sleep(100); } }
       assert.equal((await agentPost({ agent: 'intruder', event: 'start' }, lan, PORT2)).status, 403);
@@ -629,7 +629,7 @@ async function main() {
       fakeTs(node(1));
       assert.equal(await pairGet(), 200, 'your own device may ask');
       assert.equal((await wsResult(`ws://${lan}:${PORT2}/ws`)).status, 401, 'not paired yet: no token, no entry');
-      assert.match((await pairPost()).reason, /no Agent Deck panel is open/, 'nobody to approve: answered at once');
+      assert.match((await pairPost()).reason, /no Modisa panel is open/, 'nobody to approve: answered at once');
 
       // A local panel (loopback) and a remote one (with the token) watch the request.
       const local2 = new WebSocket(`ws://127.0.0.1:${PORT2}/ws`), remote2 = new WebSocket(`ws://${lan}:${PORT2}/ws?token=${'x'.repeat(32)}`);
@@ -854,7 +854,7 @@ async function main() {
   ok('agents are capped at 100');
 
   // 9s. Other machines ("hubs"): the CLI and the panel's Settings both go through config.addHub.
-  const cli = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'bin', 'agent-deck.mjs'), ...a], { env, encoding: 'utf8' });
+  const cli = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'bin', 'modisa.mjs'), ...a], { env, encoding: 'utf8' });
   const hubsNow = () => JSON.parse(fs.readFileSync(path.join(HOME, 'config.json'), 'utf8')).hubs;
   assert.equal(cli('add-hub', 'ubuntu', '100.101.102.103', 'tok_ABCdef-12345').status, 0);
   assert.equal(cli('add-hub', 'mac', 'ws://mac.tail.ts.net:47700/ws', 'tok_ABCdef-12345').status, 0);

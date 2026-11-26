@@ -1,4 +1,4 @@
-// Agent Deck panel: a small frameless window that stays on top of everything.
+// Modisa panel: a small frameless window that stays on top of everything.
 const { app, BrowserWindow, ipcMain, screen, Notification, nativeImage, Tray, Menu, globalShortcut, nativeTheme, shell, clipboard } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -9,32 +9,32 @@ const { pathToFileURL } = require('node:url');
 
 // Ubuntu's default Wayland session doesn't let apps keep themselves on top.
 // Running through XWayland does, so prefer X11 unless asked otherwise.
-if (process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND) {
+if (process.platform === 'linux' && !process.env.MODISA_WAYLAND) {
   app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
 // In Electron 45 the switch above comes too late: the panel still connected to Wayland
 // (checked on Ubuntu 24.04 / GNOME 46), where always-on-top is ignored. Only a real
-// --ozone-platform=x11 on the command line works, and `agent-deck widget` and autostart
+// --ozone-platform=x11 on the command line works, and `modisa widget` and autostart
 // pass it. If the panel was started some other way, start it again once with the flag.
-const relaunching = process.platform === 'linux' && !process.env.AGENT_DECK_WAYLAND
-  && !process.env.AGENT_DECK_RELAUNCHED && !process.argv.some((a) => a.startsWith('--ozone-platform'));
+const relaunching = process.platform === 'linux' && !process.env.MODISA_WAYLAND
+  && !process.env.MODISA_RELAUNCHED && !process.argv.some((a) => a.startsWith('--ozone-platform'));
 if (relaunching) {
   // app.relaunch() does nothing when called before "ready", so start the new process directly.
-  const env = { ...process.env, AGENT_DECK_RELAUNCHED: '1' }; // never relaunches twice
+  const env = { ...process.env, MODISA_RELAUNCHED: '1' }; // never relaunches twice
   require('node:child_process').spawn(process.execPath, [...process.argv.slice(1), '--ozone-platform=x11'], { detached: true, stdio: 'inherit', env }).unref();
   app.exit(0);
 }
 // On Ubuntu 24.04+ the separate GPU process crashes inside its sandbox (Mesa can't open
 // dri_gbm.so), and then the window is never drawn, so it never appears. Running the
 // GPU work inside the main process avoids that; the renderer sandbox stays on.
-if (process.platform === 'linux' && !process.env.AGENT_DECK_GPU) {
+if (process.platform === 'linux' && !process.env.MODISA_GPU) {
   app.commandLine.appendSwitch('disable-gpu-sandbox');
   app.commandLine.appendSwitch('in-process-gpu');
 }
 // A small panel doesn't need the GPU, and on Ubuntu the GPU process often can't load
 // the Mesa driver from inside Chromium's sandbox, which leaves the window blank or
-// invisible. Software rendering is the safe default on Linux (AGENT_DECK_GPU=1 to opt in).
-if (process.env.AGENT_DECK_NO_GPU || (process.platform === 'linux' && !process.env.AGENT_DECK_GPU)) {
+// invisible. Software rendering is the safe default on Linux (MODISA_GPU=1 to opt in).
+if (process.env.MODISA_NO_GPU || (process.platform === 'linux' && !process.env.MODISA_GPU)) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -52,7 +52,7 @@ let placed = false;       // true once our own first placement is over; later mo
 if (!relaunching && !app.requestSingleInstanceLock()) { app.quit(); }
 app.on('second-instance', () => showPanel());
 
-// ---------- show / hide (tray, shortcut, `agent-deck toggle`) ----------
+// ---------- show / hide (tray, shortcut, `modisa toggle`) ----------
 function showPanel() {
   if (!win || win.isDestroyed()) return;
   if (process.platform === 'linux') win.show(); else win.showInactive();
@@ -79,7 +79,7 @@ function setApprovals(enabled, fromTray) {
 // The tray shows Bolt in the overall state of your sessions (the panel reports it): asleep, working,
 // "?" when something needs you, X eyes on an error. Images from icons/make-icons.cjs.
 const TRAY_STATES = ['idle', 'working', 'needs', 'error'];
-const TRAY_TIPS = { idle: 'Agent Deck', working: 'Agent Deck: working', needs: 'Agent Deck: needs you', error: 'Agent Deck: something failed' };
+const TRAY_TIPS = { idle: 'Modisa', working: 'Modisa: working', needs: 'Modisa: needs you', error: 'Modisa: something failed' };
 const trayImages = {};
 const trayImage = (st) => (trayImages[st] ||= nativeImage.createFromPath(path.join(__dirname, 'icons', `tray-${st}.png`)).resize({ width: 22, height: 22 }));
 let trayState = 'idle';
@@ -91,7 +91,7 @@ function createTray() {
     updateTray();
   } catch (e) {
     tray = null;
-    console.log('[agent-deck] no tray icon: ' + e.message);
+    console.log('[modisa] no tray icon: ' + e.message);
   }
 }
 function updateTray() {
@@ -102,11 +102,11 @@ function updateTray() {
     { label: 'Answer approvals here', type: 'checkbox', checked: approvals, click: (item) => setApprovals(item.checked, true) },
     { label: 'Notifications', type: 'checkbox', checked: config?.loadConfig().notifications !== false, click: (item) => { config.saveConfig({ notifications: item.checked }); updateTray(); } },
     { type: 'separator' },
-    { label: 'Quit Agent Deck', click: () => app.quit() },
+    { label: 'Quit Modisa', click: () => app.quit() },
   ]));
 }
 
-// The panel grabs its shortcut itself unless GNOME runs it (`agent-deck shortcut`): with
+// The panel grabs its shortcut itself unless GNOME runs it (`modisa shortcut`): with
 // both, one key press would toggle twice. Under GNOME Wayland a grab by this XWayland
 // window only fires while another X11 window has focus, hence the GNOME binding.
 function applyShortcut(cfg) {
@@ -117,11 +117,11 @@ function applyShortcut(cfg) {
   if (!want) return;
   try {
     if (globalShortcut.register(want, togglePanel)) shortcutKey = want;
-    else console.log(`[agent-deck] shortcut ${want} is already taken`);
-  } catch (e) { console.log(`[agent-deck] shortcut ${want}: ${e.message}`); }
+    else console.log(`[modisa] shortcut ${want} is already taken`);
+  } catch (e) { console.log(`[modisa] shortcut ${want}: ${e.message}`); }
 }
 
-// `agent-deck toggle|show|hide` talk to the running panel over this socket.
+// `modisa toggle|show|hide` talk to the running panel over this socket.
 function startControlSocket() {
   const sock = path.join(config.HOME, 'panel.sock');
   try { fs.unlinkSync(sock); } catch {}
@@ -134,7 +134,7 @@ function startControlSocket() {
       c.end(win && !win.isDestroyed() && win.isVisible() ? 'shown\n' : 'hidden\n');
     });
   });
-  srv.on('error', (e) => console.log('[agent-deck] control socket: ' + e.message));
+  srv.on('error', (e) => console.log('[modisa] control socket: ' + e.message));
   srv.listen(sock, () => { try { fs.chmodSync(sock, 0o600); } catch {} });
   app.on('will-quit', () => { srv.close(); try { fs.unlinkSync(sock); } catch {} });
 }
@@ -172,7 +172,7 @@ async function createWindow() {
     frame: false, resizable: true, maximizable: false, minimizable: false, fullscreenable: false,
     minWidth: WIDTH, maxWidth: WIDTH,
     alwaysOnTop: true, skipTaskbar: true, show: false,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? BG.dark : BG.light, hasShadow: true, title: 'Agent Deck',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? BG.dark : BG.light, hasShadow: true, title: 'Modisa',
     icon: nativeImage.createFromPath(path.join(__dirname, 'icon.png')),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false },
   });
@@ -199,26 +199,26 @@ async function createWindow() {
   const reveal = (why) => {
     if (shown || win.isDestroyed()) return;
     shown = true;
-    if (startHidden) { console.log('[agent-deck] starting hidden (tray, shortcut or "agent-deck show" brings it back)'); return; }
+    if (startHidden) { console.log('[modisa] starting hidden (tray, shortcut or "modisa show" brings it back)'); return; }
     showPanel();
-    console.log(`[agent-deck] window shown (${why}) at ${JSON.stringify(win.getBounds())}; displays: ${JSON.stringify(screen.getAllDisplays().map((d) => ({ bounds: d.bounds, workArea: d.workArea, scale: d.scaleFactor })))}`);
+    console.log(`[modisa] window shown (${why}) at ${JSON.stringify(win.getBounds())}; displays: ${JSON.stringify(screen.getAllDisplays().map((d) => ({ bounds: d.bounds, workArea: d.workArea, scale: d.scaleFactor })))}`);
   };
   win.once('ready-to-show', () => reveal('ready'));
   win.webContents.once('did-finish-load', () => setTimeout(() => reveal('loaded'), 300));
   setTimeout(() => reveal('timer'), 2500);
-  win.webContents.on('render-process-gone', (_e, d) => console.log('[agent-deck] renderer gone: ' + JSON.stringify(d)));
-  win.webContents.on('console-message', (e) => { if (e.level === 'warning' || e.level === 'error') console.log('[agent-deck] page: ' + e.message); });
+  win.webContents.on('render-process-gone', (_e, d) => console.log('[modisa] renderer gone: ' + JSON.stringify(d)));
+  win.webContents.on('console-message', (e) => { if (e.level === 'warning' || e.level === 'error') console.log('[modisa] page: ' + e.message); });
 
-  // Development aid: AGENT_DECK_SCREENSHOT=/path.png saves an image of the panel and quits.
-  if (process.env.AGENT_DECK_SCREENSHOT) {
-    if (process.env.AGENT_DECK_EVAL) {
-      setTimeout(() => win.webContents.executeJavaScript(process.env.AGENT_DECK_EVAL).catch(() => {}), Number(process.env.AGENT_DECK_SCREENSHOT_DELAY || 3000) / 2);
+  // Development aid: MODISA_SCREENSHOT=/path.png saves an image of the panel and quits.
+  if (process.env.MODISA_SCREENSHOT) {
+    if (process.env.MODISA_EVAL) {
+      setTimeout(() => win.webContents.executeJavaScript(process.env.MODISA_EVAL).catch(() => {}), Number(process.env.MODISA_SCREENSHOT_DELAY || 3000) / 2);
     }
     setTimeout(async () => {
       const img = await win.webContents.capturePage();
-      fs.writeFileSync(process.env.AGENT_DECK_SCREENSHOT, img.toPNG());
+      fs.writeFileSync(process.env.MODISA_SCREENSHOT, img.toPNG());
       app.quit();
-    }, Number(process.env.AGENT_DECK_SCREENSHOT_DELAY || 3000));
+    }, Number(process.env.MODISA_SCREENSHOT_DELAY || 3000));
   }
 
   // Remember where the panel was dragged. 'moved' only exists on macOS and Windows, so use
@@ -230,14 +230,14 @@ async function createWindow() {
     moveTimer = setTimeout(() => { const [x, y] = win.getPosition(); config.saveConfig({ window: { x, y } }); }, 400);
   });
 
-  // Pick up hubs added with "agent-deck add-hub" (and `agent-deck shortcut`) without a restart.
+  // Pick up hubs added with "modisa add-hub" (and `modisa shortcut`) without a restart.
   fs.watchFile(config.CONFIG_PATH, { interval: 2000 }, () => {
     applyShortcut(config.loadConfig());
     if (win && !win.isDestroyed()) win.webContents.send('config-changed', rendererConfig());
   });
 }
 
-// When this machine is shared ("agent-deck share"): its address for other machines, and the line
+// When this machine is shared ("modisa share"): its address for other machines, and the line
 // to paste into their panel (it holds the token, so only main copies it; the page never sees it).
 const lanV4 = () => Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === 'IPv4' && !a.internal).map((a) => a.address);
 const tailscaleV4 = () => lanV4().find((a) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a)) || null; // 100.64.0.0/10
@@ -247,7 +247,7 @@ function shareAddress(cfg) {
   if (host === '0.0.0.0' || host === '::') host = tailscaleV4() || lanV4()[0] || '<this-machine-ip>';
   return `ws://${host.includes(':') ? `[${host}]` : host}:${cfg.port}`;
 }
-const shareLine = (cfg) => { const at = shareAddress(cfg); return at && `agent-deck add-hub ${config.machineName(cfg)} ${at} ${cfg.token}`; };
+const shareLine = (cfg) => { const at = shareAddress(cfg); return at && `modisa add-hub ${config.machineName(cfg)} ${at} ${cfg.token}`; };
 
 function rendererConfig() {
   const cfg = config.loadConfig();
@@ -313,10 +313,10 @@ ipcMain.on('tray-state', (_e, st) => {
   if (!TRAY_STATES.includes(st) || st === trayState) return;
   trayState = st;
   if (tray) { tray.setImage(trayImage(st)); tray.setToolTip(TRAY_TIPS[st]); }
-  console.log(`[agent-deck] tray: ${st}`);
+  console.log(`[modisa] tray: ${st}`);
 });
 
-// Other machines, from the settings view. config.addHub validates (same as "agent-deck add-hub").
+// Other machines, from the settings view. config.addHub validates (same as "modisa add-hub").
 const configChanged = () => { if (win && !win.isDestroyed()) win.webContents.send('config-changed', rendererConfig()); };
 ipcMain.handle('add-hub', (_e, { name, address, token } = {}) => {
   const r = config.addHub(name, address, token);
@@ -330,8 +330,8 @@ ipcMain.on('copy-share-line', () => { const line = shareLine(config.loadConfig()
 let tsModule = null;
 const tailscale = async () => (tsModule ||= await import(pathToFileURL(path.join(__dirname, '..', 'src', 'tailscale.mjs')).href));
 const v4Of = (p) => p.ips.find((a) => a.includes('.')) || null;
-// Your own devices (same Tailscale user, not tagged servers), and whether Agent Deck answers there.
-// Agent Deck only answers on a machine that has "Share this machine" on.
+// Your own devices (same Tailscale user, not tagged servers), and whether Modisa answers there.
+// Modisa only answers on a machine that has "Share this machine" on.
 ipcMain.handle('tailscale-devices', async () => {
   const st = await (await tailscale()).tsStatus();
   if (!st) return { ok: false, error: 'Tailscale isn\'t running on this machine.' };
@@ -340,12 +340,12 @@ ipcMain.handle('tailscale-devices', async () => {
   const mine = st.peers.filter((p) => p.userId === st.self.userId && !p.tagged && v4Of(p));
   const list = await Promise.all(mine.map(async (p) => {
     const ip = v4Of(p);
-    // 404 = an Agent Deck from before pairing existed (shared, but needs a git pull there).
+    // 404 = a Modisa from before pairing existed (shared, but needs a git pull there).
     const probe = p.online ? await fetch(`http://${ip}:${cfg.port}/pair`, { signal: AbortSignal.timeout(2500) })
       .then((r) => (r.ok ? r.json() : { outdated: r.status === 404 })).catch(() => null) : null;
-    return { dns: p.dns, name: p.name, os: p.os, online: p.online, ip, agentDeck: Boolean(probe?.agentDeck), outdated: Boolean(probe?.outdated), added: added.has(config.hubUrl(`${ip}:${cfg.port}`)) };
+    return { dns: p.dns, name: p.name, os: p.os, online: p.online, ip, modisa: Boolean(probe?.modisa), outdated: Boolean(probe?.outdated), added: added.has(config.hubUrl(`${ip}:${cfg.port}`)) };
   }));
-  return { ok: true, devices: list.sort((a, b) => Number(b.agentDeck) - Number(a.agentDeck) || Number(b.online) - Number(a.online)) };
+  return { ok: true, devices: list.sort((a, b) => Number(b.modisa) - Number(a.modisa) || Number(b.online) - Number(a.online)) };
 });
 // Ask that machine to let this panel in; its panel shows Allow / Deny. Resolves when answered.
 ipcMain.handle('pair', async (_e, ip, letBack) => {
@@ -358,7 +358,7 @@ ipcMain.handle('pair', async (_e, ip, letBack) => {
     // "shared" offers the other way round; only when you ticked it here and this machine is shared.
     body: JSON.stringify({ shared: letBack === true && !config.isLoopback(cfg.bind), port: cfg.port }), signal: AbortSignal.timeout(150000),
   }).then((x) => (x.ok ? x.json() : { approved: false, reason: `refused (${x.status})` }), () => null);
-  if (!r) return { ok: false, error: `Couldn't reach Agent Deck on ${peer.dns}. Is "Share this machine" on there?` };
+  if (!r) return { ok: false, error: `Couldn't reach Modisa on ${peer.dns}. Is "Share this machine" on there?` };
   if (!r.approved) return { ok: false, error: `${peer.dns}: ${r.reason || 'not allowed'}` };
   const url = config.hubUrl(`${ip}:${cfg.port}`);
   if (!(config.loadConfig().hubs || []).some((h) => config.hubUrl(h.url) === url)) config.addHub(peer.dns, url, null);
@@ -366,18 +366,18 @@ ipcMain.handle('pair', async (_e, ip, letBack) => {
   return { ok: true, back: Boolean(r.back), name: peer.dns };
 });
 
-// "Share this machine": runs "agent-deck share <Tailscale IP>" / "agent-deck unshare", which restart
+// "Share this machine": runs "modisa share <Tailscale IP>" / "modisa unshare", which restart
 // the daemon. The panel has no node of its own, so Electron runs the CLI as plain Node; the daemon it
-// starts runs that way too, until the next "agent-deck restart" from a terminal.
+// starts runs that way too, until the next "modisa restart" from a terminal.
 ipcMain.handle('share', async (_e, on) => {
   const ip = on ? tailscaleV4() : null;
-  if (on && !ip) return { ok: false, error: 'No Tailscale address on this machine. Install Tailscale and sign in (for an office LAN, run "agent-deck share <LAN IP>").' };
-  const cli = path.join(__dirname, '..', 'bin', 'agent-deck.mjs');
+  if (on && !ip) return { ok: false, error: 'No Tailscale address on this machine. Install Tailscale and sign in (for an office LAN, run "modisa share <LAN IP>").' };
+  const cli = path.join(__dirname, '..', 'bin', 'modisa.mjs');
   const failed = await new Promise((resolve) => execFile(process.execPath, [cli, ...(on ? ['share', ip] : ['unshare'])],
     { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 20000 }, (err) => resolve(err)));
   configChanged();
   const shared = !config.isLoopback(config.loadConfig().bind);
-  if (failed || shared !== Boolean(on)) return { ok: false, error: `Couldn't restart Agent Deck's daemon; see ${config.LOG_PATH}` };
+  if (failed || shared !== Boolean(on)) return { ok: false, error: `Couldn't restart Modisa's daemon; see ${config.LOG_PATH}` };
   return { ok: true };
 });
 
@@ -398,7 +398,7 @@ ipcMain.on('notify', (_e, { title, body, target }) => {
   if (config.loadConfig().notifications === false || !Notification.isSupported()) return;
   title = String(title).slice(0, 80);
   body = String(body).slice(0, 200);
-  console.log(`[agent-deck] notify: ${title} | ${body}`);
+  console.log(`[modisa] notify: ${title} | ${body}`);
   const n = new Notification({ title, body, silent: false });
   liveNotifications.add(n);
   const done = () => liveNotifications.delete(n);
@@ -416,8 +416,8 @@ ipcMain.on('open-link', (_e, url) => {
   let u;
   try { u = new URL(String(url)); } catch { return; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return;
-  console.log(`[agent-deck] open link: ${u.origin}${process.env.AGENT_DECK_NO_OPEN ? ' (not opened: AGENT_DECK_NO_OPEN)' : ''}`);
-  if (!process.env.AGENT_DECK_NO_OPEN) shell.openExternal(u.href);
+  console.log(`[modisa] open link: ${u.origin}${process.env.MODISA_NO_OPEN ? ' (not opened: MODISA_NO_OPEN)' : ''}`);
+  if (!process.env.MODISA_NO_OPEN) shell.openExternal(u.href);
 });
 
 ipcMain.on('quit', () => app.quit());

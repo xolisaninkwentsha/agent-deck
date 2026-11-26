@@ -98,7 +98,7 @@ async function main() {
   for (const plain of ['serve -p 8080', 'docker run -p 3000:3000 img', 'find . -print', 'mysql -u root app', 'curl -H "Accept: text/html" https://x.io', 'ssh -p 22 host', 'cp -pr src dst', 'sudo cp -pr a b','mkdir -pv a/b', 'ls -pa', 'lsof -p1234', 'pytest -pno:cacheprovider', 'ssh -p22 host', 'docker run -p3000:3000 img'])assert.equal(maskSecrets(plain), plain);
   check('leaves port flags and ordinary headers alone');
 
-  for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/agent-deck/node_modules']) assert.equal(maskSecrets(plain), plain);
+  for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/modisa/node_modules']) assert.equal(maskSecrets(plain), plain);
   check('leaves ordinary commands alone');
 
   const bash = phoneSummary({ toolName: 'Bash', toolInput: { command: 'TOKEN=abc123 ./x.sh' + ' y'.repeat(600) }, project: 'api' });
@@ -165,9 +165,9 @@ async function main() {
 
   const awayDir = fs.mkdtempSync(path.join(os.tmpdir(), 'away-'));
   const awayFile = path.join(awayDir, 'away.json');
-  const prevAway = process.env.AGENT_DECK_AWAY_FILE;
+  const prevAway = process.env.MODISA_AWAY_FILE;
   try {
-    process.env.AGENT_DECK_AWAY_FILE = awayFile;
+    process.env.MODISA_AWAY_FILE = awayFile;
     fs.writeFileSync(awayFile, '{"idleMs":400000,"locked":false}');
     assert.deepEqual(await localAway(), { away: true, known: true, idleMs: 400000, locked: false });
     fs.writeFileSync(awayFile, '{"idleMs":1000,"locked":false}');
@@ -180,7 +180,7 @@ async function main() {
     fs.rmSync(awayFile);
     assert.deepEqual(await localAway(), { away: false, known: false, idleMs: null, locked: null });
   } finally {
-    if (prevAway === undefined) delete process.env.AGENT_DECK_AWAY_FILE; else process.env.AGENT_DECK_AWAY_FILE = prevAway;
+    if (prevAway === undefined) delete process.env.MODISA_AWAY_FILE; else process.env.MODISA_AWAY_FILE = prevAway;
     fs.rmSync(awayDir, { recursive: true, force: true });
   }
   check('localAway reads the test file: idle, locked, threshold, unparsable and missing');

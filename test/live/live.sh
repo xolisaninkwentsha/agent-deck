@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Live checks against a real Claude Code session, isolated from your own daemon and panel.
-# See test/live/README.md. Everything lives in $AGENT_DECK_LIVE_DIR (default test/live/.work).
+# See test/live/README.md. Everything lives in $MODISA_LIVE_DIR (default test/live/.work).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-WORK=${AGENT_DECK_LIVE_DIR:-$HERE/.work}
-PORT=${AGENT_DECK_LIVE_PORT:-47690}
-CDP=${AGENT_DECK_LIVE_CDP:-9339}
-export AGENT_DECK_HOME="$WORK/home"
+WORK=${MODISA_LIVE_DIR:-$HERE/.work}
+PORT=${MODISA_LIVE_PORT:-47690}
+CDP=${MODISA_LIVE_CDP:-9339}
+export MODISA_HOME="$WORK/home"
 mkdir -p "$WORK/home" "$WORK/drv/cmds" "$WORK/proj"
 # The test panel opens below where your own panel sits by default (top right of the main screen).
 # OTLP on 4319 so the test daemon never takes your real daemon's 4318.
@@ -19,12 +19,12 @@ case "${1:-help}" in
     python3 -c 'import pexpect' 2>/dev/null || { echo "needs python3-pexpect"; exit 1; }
     python3 -m pip install -q --target "$HERE/.pylib" pyte 2>/dev/null || pip3 install -q --target "$HERE/.pylib" pyte ;;
   daemon)   # foreground; Ctrl+C stops it. Every hook payload goes to $WORK/home/events.jsonl
-    AGENT_DECK_EVENT_LOG="$WORK/home/events.jsonl" exec node "$ROOT/src/daemon.mjs" ;;
+    MODISA_EVENT_LOG="$WORK/home/events.jsonl" exec node "$ROOT/src/daemon.mjs" ;;
   panel)    # a second panel with its own profile, drivable over DevTools on $CDP
-    exec node "$ROOT/bin/agent-deck.mjs" widget --user-data-dir="$WORK/electron" --remote-debugging-port="$CDP" ;;
+    exec node "$ROOT/bin/modisa.mjs" widget --user-data-dir="$WORK/electron" --remote-debugging-port="$CDP" ;;
   session)  # foreground; extra args go to claude, e.g.: live.sh session --permission-mode default --model sonnet
     shift; rm -f "$WORK/drv/exit"
-    AGENT_DECK_PORT=$PORT exec python3 -I "$HERE/drive.py" "$WORK/drv" "$WORK/proj" "$@" ;;
+    MODISA_PORT=$PORT exec python3 -I "$HERE/drive.py" "$WORK/drv" "$WORK/proj" "$@" ;;
   send)     # live.sh send key <name> [times] | text <s> | prompt <s>   (then waits ${WAIT:-1}s)
     case "$2" in
       key)    node -e 'console.log(JSON.stringify({key:process.argv[1],times:Number(process.argv[2]||1)}))' "$3" "${4:-1}" > "$WORK/drv/cmds/$(n).json" ;;

@@ -1,4 +1,6 @@
-# Agent Deck
+# Modisa
+
+*Modisa* is Setswana for a herdsman: the one who keeps an eye on the herd. This one keeps an eye on your agents.
 
 A small panel that stays on top of your screen and shows every Claude Code session on your machines:
 
@@ -14,11 +16,11 @@ It works through Claude Code's own [hooks](https://code.claude.com/docs/en/hooks
 ## How it fits together
 
 ```
- Claude Code session ──hook──▶ agent-deck daemon (one per machine, 127.0.0.1:47615)
+ Claude Code session ──hook──▶ modisa daemon (one per machine, 127.0.0.1:47615)
  Claude Code session ──hook──▶        │
                                       │ WebSocket (token required from other machines)
                                       ▼
-                         Agent Deck panel (Electron, always on top)
+                         Modisa panel (Electron, always on top)
                          connects to this machine + any machines you add
 ```
 
@@ -31,12 +33,12 @@ It works through Claude Code's own [hooks](https://code.claude.com/docs/en/hooks
 Needs Node 18+ and Claude Code.
 
 ```bash
-cd agent-deck
+cd modisa
 npm install                 # also downloads Electron for the panel
-npm link                    # puts the `agent-deck` command on your PATH (or use: node bin/agent-deck.mjs ...)
-agent-deck install          # adds the hooks to ~/.claude/settings.json (backs it up first) and starts the daemon
-agent-deck widget           # opens the panel
-agent-deck autostart        # optional: open the panel when you log in
+npm link                    # puts the `modisa` command on your PATH (or use: node bin/modisa.mjs ...)
+modisa install          # adds the hooks to ~/.claude/settings.json (backs it up first) and starts the daemon
+modisa widget           # opens the panel
+modisa autostart        # optional: open the panel when you log in
 ```
 
 Sessions that were already open show up straight away as **watch only** (see below). Hooks are read when a session starts, so restart a session to answer its approvals and questions from the panel.
@@ -45,45 +47,45 @@ Sessions that were already open show up straight away as **watch only** (see bel
 
 ### With Tailscale: pair, nothing to copy
 
-Both machines need Tailscale signed in to the same account, and Agent Deck.
+Both machines need Tailscale signed in to the same account, and Modisa.
 
 1. On the machine you want to *watch* (e.g. Ubuntu): **Settings → Share this machine** on.
-2. On the other one (e.g. the Mac): **Settings → Your devices on Tailscale** lists your devices where Agent Deck is shared. Click **Connect**. If the Mac is shared too, you can tick **both ways** first to offer the reverse.
+2. On the other one (e.g. the Mac): **Settings → Your devices on Tailscale** lists your devices where Modisa is shared. Click **Connect**. If the Mac is shared too, you can tick **both ways** first to offer the reverse.
 3. On the watched machine, a card and a notification ask "*Mac* wants to see this machine". Click **Allow**. If the Mac offered both ways, the card also has **Also show its sessions here**. Nothing is granted in reverse unless both sides ticked it.
 
 How it stays safe:
-- **Who may ask:** Agent Deck asks Tailscale (`tailscale whois`) who is connecting. Only your own devices (the same Tailscale user) may ask. Tagged servers and other people's devices are refused, and so is anything Tailscale can't vouch for.
+- **Who may ask:** Modisa asks Tailscale (`tailscale whois`) who is connecting. Only your own devices (the same Tailscale user) may ask. Tagged servers and other people's devices are refused, and so is anything Tailscale can't vouch for.
 - **No token for paired devices:** a paired device connects without a token, because its Tailscale identity is checked on every connection.
 - **Who can approve:** only a panel on the watched machine can allow a request or remove a device. Another machine's panel never even sees the requests.
-- **What Allow grants:** trust goes to the **device**, not to one app. Anything running on a paired device can see your sessions and agents here and answer their approvals and questions. With a token, a program on that machine would first have to read Agent Deck's config. So pair only devices you'd trust at your keyboard.
+- **What Allow grants:** trust goes to the **device**, not to one app. Anything running on a paired device can see your sessions and agents here and answer their approvals and questions. With a token, a program on that machine would first have to read Modisa's config. So pair only devices you'd trust at your keyboard.
 - **Removing:** **Settings → Can see this machine** lists paired devices. **Remove** disconnects one at once.
-- **Repeat requests:** after a Deny, the same device can't ask again for 10 minutes. Paired devices are kept in `~/.agent-deck/devices.json`.
+- **Repeat requests:** after a Deny, the same device can't ask again for 10 minutes. Paired devices are kept in `~/.modisa/devices.json`.
 
 ### With a token (an office LAN, or without Tailscale)
 
 On the machine you want to *watch*, turn on **Settings → Share this machine** (it uses the Tailscale address), or run this in a terminal:
 
 ```bash
-agent-deck share            # listens on the network with a random token, prints a command to run on the other machine
+modisa share            # listens on the network with a random token, prints a command to run on the other machine
 ```
 
-Either way the daemon restarts, so a prompt the panel is holding at that moment goes back to the terminal. Turning it off (or `agent-deck unshare`) makes it local-only again and keeps the token, so panels that added this machine reconnect when you share again. A daemon restarted from the panel runs on Electron's built-in Node until the next `agent-deck restart`.
+Either way the daemon restarts, so a prompt the panel is holding at that moment goes back to the terminal. Turning it off (or `modisa unshare`) makes it local-only again and keeps the token, so panels that added this machine reconnect when you share again. A daemon restarted from the panel runs on Electron's built-in Node until the next `modisa restart`.
 
 It prints something like:
 
 ```
-agent-deck add-hub ubuntu ws://100.101.102.103:47615 <token>
+modisa add-hub ubuntu ws://100.101.102.103:47615 <token>
 ```
 
 On the Mac, open the panel's **Settings → Other machines**, paste that whole line into any field of **Add a machine** (it fills in the name, address and token), and click **Add**. Or run the line in a terminal. The panel connects within a few seconds, and each card shows a small machine label. **Remove** in the same list disconnects it.
 
 On the shared machine, **Share this machine** shows the address it's shared on, and **Copy line** copies that line (token included, so treat it like a password). To see both machines from both panels, share each one and add each to the other.
 
-- Use **Tailscale** or your office LAN. Don't expose the port to the internet: the connection isn't encrypted by Agent Deck itself (Tailscale encrypts it).
+- Use **Tailscale** or your office LAN. Don't expose the port to the internet: the connection isn't encrypted by Modisa itself (Tailscale encrypts it).
 - Web pages in your browser can't talk to the daemon: requests that come with a browser's `Origin` header (other than the panel's own) are refused, and hooks and agents can only report from this machine.
-- To share on one interface only: `agent-deck share 100.101.102.103` (your Tailscale IP). The daemon still listens on 127.0.0.1 for this machine's own hooks and panel.
+- To share on one interface only: `modisa share 100.101.102.103` (your Tailscale IP). The daemon still listens on 127.0.0.1 for this machine's own hooks and panel.
 - Addresses can be given as `100.101.102.103`, `host:port` or `ws://host:port`; the port defaults to 47615.
-- `agent-deck unshare` makes the machine local-only again.
+- `modisa unshare` makes the machine local-only again.
 - Answering approvals for the remote machine works the same as local.
 
 ## Approvals and questions: how the hand-off works
@@ -93,7 +95,7 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
 - **Claude Code shows its normal prompt in the terminal at the same time**, so answer wherever you are. If you answer in the panel, the terminal prompt closes and Claude carries on.
 - For questions this holds in the default, accept-edits, plan and auto permission modes (checked with Claude Code 2.1.332). In any other mode (for example bypass permissions) the panel gets the question *first*, and the terminal only shows it after you click **Terminal** or the hold runs out.
 - If you answer in the terminal instead, the card clears by itself within a couple of seconds.
-- If nobody answers in the panel within **5 minutes** (`holdSeconds` in `~/.agent-deck/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer. (A question in a mode where the panel gets it first is held for at most 90 seconds.)
+- If nobody answers in the panel within **5 minutes** (`holdSeconds` in `~/.modisa/config.json`), or you click **Terminal**, the card says "Waiting for you in the terminal" and only the terminal can answer. (A question in a mode where the panel gets it first is held for at most 90 seconds.)
 - If no panel is open, nothing is held: Claude Code behaves exactly as before.
 - The **shield** button in the panel header turns this off. With it off, the panel only watches and every prompt goes to the terminal.
 
@@ -101,15 +103,15 @@ When Claude Code asks for permission, asks for a plan approval, or asks you a qu
 
 ## Phone approvals (WhatsApp)
 
-When you're away from your computer, Agent Deck can send an approval or a question to your phone on WhatsApp. You answer there with a tap, and Claude carries on.
+When you're away from your computer, Modisa can send an approval or a question to your phone on WhatsApp. You answer there with a tap, and Claude carries on.
 
-- **Connect it:** open the panel's Settings, find "Phone (WhatsApp)", enter your number with the country code (for example +27 82 123 4567) and press **Connect**. The panel shows a short code. Send that code to the Agent Deck bot on WhatsApp (**Open WhatsApp** does it for you) within 10 minutes. The panel then shows "Connected".
+- **Connect it:** open the panel's Settings, find "Phone (WhatsApp)", enter your number with the country code (for example +27 82 123 4567) and press **Connect**. The panel shows a short code. Send that code to the Modisa bot on WhatsApp (**Open WhatsApp** does it for you) within 10 minutes. The panel then shows "Connected".
 - **When it sends:** by default only when you're away: the screen is locked, there has been no keyboard or mouse input for 5 minutes, or a permission prompt has sat unanswered for 2 minutes. If another of your panels is in use, this machine doesn't count as away. Choose **Send everything** in Settings to get every prompt on your phone.
 - **On the card:** a prompt that went to your phone says "Sent to your phone". If it couldn't be sent (no credit, the hourly limit, the phone not connected), the card says why, and you can still answer in the panel or the terminal.
 - **Secrets are masked, as far as a pattern can tell:** what goes to WhatsApp has the tokens, keys and passwords it recognizes hidden. Masking is best effort, so an unusual secret can get through. The message text passes through Meta (WhatsApp) and the relay on its way to your phone. A command longer than 900 characters is cut and says how many characters are left out, so check the rest on the computer; long plans are shortened too.
 - **"Always" is never offered on the phone.** You can only allow, deny or answer the prompt you were sent, while it's still open. To always allow something, use the panel or the terminal.
 - **Turn it off:** the switch "Phone approvals on this machine" stops sending from this machine; **Disconnect** unlinks the number.
-- **The relay:** the phone link goes through a relay, a small service that talks to WhatsApp for you. You can use the hosted relay if one is provided for your copy of Agent Deck, or run your own: see [`relay/README.md`](relay/README.md), then paste its address under "Relay address" in Settings (it starts with `wss://`). Agent Deck connects to the relay only while you're linking a number or a number is linked.
+- **The relay:** the phone link goes through a relay, a small service that talks to WhatsApp for you. You can use the hosted relay if one is provided for your copy of Modisa, or run your own: see [`relay/README.md`](relay/README.md), then paste its address under "Relay address" in Settings (it starts with `wss://`). Modisa connects to the relay only while you're linking a number or a number is linked.
 
 ## Service agents
 
@@ -122,27 +124,27 @@ Long-running agents that aren't Claude Code sessions (scheduled jobs, chat bots)
 
 Click a card to see the waiting items as links (they open in the browser: the Chat thread or email where you answer), the recent jobs, the last error and the schedule. **The panel doesn't approve anything for these agents**; approvals stay where the agent asks for them.
 
-An agent reports with the tiny Python client in `clients/python/agent_deck.py`. It uses only the standard library: copy it into the agent's repo. It never raises and never blocks; if Agent Deck isn't running, events are dropped.
+An agent reports with the tiny Python client in `clients/python/modisa.py`. It uses only the standard library: copy it into the agent's repo. It never raises and never blocks; if Modisa isn't running, events are dropped.
 
 ```python
-from agent_deck import Deck
-deck = Deck("finance-agent")
-deck.start("Billing and collections", heartbeat=60)   # in the long-running process only
-with deck.job("daily") as job:                        # job_start / job_end (error if it raises)
-    deck.step("Matching payments")
-    deck.waiting("bill-42", "Approve supplier bill 42", "https://chat.google.com/...")
+from modisa import Agent
+agent = Agent("finance-agent")
+agent.start("Billing and collections", heartbeat=60)   # in the long-running process only
+with agent.job("daily") as job:                        # job_start / job_end (error if it raises)
+    agent.step("Matching payments")
+    agent.waiting("bill-42", "Approve supplier bill 42", "https://chat.google.com/...")
     job.summary = "3 reminders sent"
-deck.resolved("bill-42")
-deck.error("Xero sign-in expired")
+agent.resolved("bill-42")
+agent.error("Xero sign-in expired")
 ```
 
-- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification). `start(..., timer=False)` plus `deck.heartbeat()` from the agent's own main loop catches a hung loop; the default timer thread only proves the process is alive. Beat in **every** wait of the loop, back-off sleeps after errors included, or a loop that backs off for minutes reads as hung.
+- **Liveness:** an agent that declared a heartbeat interval and has sent nothing for 3× that interval shows **Not responding** (red, with a notification). `start(..., timer=False)` plus `agent.heartbeat()` from the agent's own main loop catches a hung loop; the default timer thread only proves the process is alive. Beat in **every** wait of the loop, back-off sleeps after errors included, or a loop that backs off for minutes reads as hung.
 - **Two kinds of process:** typically a long-running process (heartbeat, chat) and short scheduled jobs. Call `start()` only in the long-running command (e.g. `chat-watch`), never in setup that cron jobs share, or each cron run counts as a restart. Restarting the long-running one keeps jobs that cron started and the last error. A job that never reports its end is marked failed after `agentJobMaxHours` (12).
 - **Sleep:** while this machine is suspended nothing can arrive, so after waking the heartbeat clocks move on by the time asleep instead of flagging every agent.
-- **What's waiting:** `deck.waiting_set([...])` sends the complete list of open items and replaces the panel's, so a lost `resolved` can't leave a stale item.
-- **Privacy:** keep titles and messages short, with no names, amounts or email text. They're stored in `~/.agent-deck/state.json`, shown in notifications and on any panel the machine is shared with. A failed job reports only the exception's type, never its message.
-- **Tests:** `AGENT_DECK_DISABLE=1` turns the client off, so an agent's own test suite doesn't post to your panel.
-- **Schedule:** the daemon reads your crontab and lists the lines that run in the agent's working folder (`python -m <package> <job>`), with their next run. An agent can also send its own (`deck.schedule([(job, next_run), ...])`).
+- **What's waiting:** `agent.waiting_set([...])` sends the complete list of open items and replaces the panel's, so a lost `resolved` can't leave a stale item.
+- **Privacy:** keep titles and messages short, with no names, amounts or email text. They're stored in `~/.modisa/state.json`, shown in notifications and on any panel the machine is shared with. A failed job reports only the exception's type, never its message.
+- **Tests:** `MODISA_DISABLE=1` turns the client off, so an agent's own test suite doesn't post to your panel.
+- **Schedule:** the daemon reads your crontab and lists the lines that run in the agent's working folder (`python -m <package> <job>`), with their next run. An agent can also send its own (`agent.schedule([(job, next_run), ...])`).
 - **Under the hood:** `POST http://127.0.0.1:47615/agent` with JSON `{agent, event, ...}`; only requests from this machine are accepted. Events: `start` (name, description, heartbeat, cwd), `heartbeat`, `job_start` (job, detail), `step` (text), `job_end` (job, result ok|error, summary), `waiting` (id, title, link), `resolved` (id), `schedule` (list of {job, next_run}), `error` (message).
 - **To see it** without real agents: `node test/demo.mjs` adds two demo agents (one waiting on you, one that stops responding).
 
@@ -205,23 +207,23 @@ What the card reads:
 - **GenAI names:** the GenAI conventions are still in development. Newer names are tried first and older ones are accepted; a missing attribute just means less detail.
 - **Metadata only:** the receiver never stores span or status messages, log bodies, or `gen_ai.*` message content. Still, don't send what you don't need: leave `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` off, and keep titles to the kind of item, with no names or amounts.
 
-## Sessions that started before Agent Deck
+## Sessions that started before Modisa
 
 Claude Code keeps a small file per running session in `~/.claude/sessions/`, with its folder, its title and whether it's busy, idle or waiting for you. The daemon reads these every 2 seconds:
 
-- **Sessions without hooks** (started before `agent-deck install`, or with hooks pointing elsewhere) get a card marked **watch only**. It shows the session's title, status (including "Needs approval in the terminal"), the step it's on (from the end of its transcript) and task progress. Answer those prompts in the terminal; restart the session to answer from the panel. The card turns into a normal one as soon as the session's hooks report.
+- **Sessions without hooks** (started before `modisa install`, or with hooks pointing elsewhere) get a card marked **watch only**. It shows the session's title, status (including "Needs approval in the terminal"), the step it's on (from the end of its transcript) and task progress. Answer those prompts in the terminal; restart the session to answer from the panel. The card turns into a normal one as soon as the session's hooks report.
 - **All cards** use Claude Code's own session title, which reads better than the first prompt.
 - It also confirms when you've answered a prompt in the terminal, so the panel's card clears even when no hook event follows (for example "Yes" on a long-running command, or feedback on a plan).
 
-The file isn't a documented Claude Code format (checked with 2.1.332). If it changes, those extras stop and the rest of Agent Deck works as before.
+The file isn't a documented Claude Code format (checked with 2.1.332). If it changes, those extras stop and the rest of Modisa works as before.
 
 ## Show, hide, tray
 
 - **Ctrl+Alt+A** shows or hides the panel (`shortcut` in the config). The panel remembers whether it was hidden.
 - **Tray icon** (top bar on Ubuntu): show/hide the panel, turn "Answer approvals here" on or off (the same as the shield), quit.
 - **Esc** collapses the panel to its header; the ^ button opens it again.
-- `agent-deck toggle | show | hide` does the same from a terminal or script.
-- **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `agent-deck shortcut` once. It adds a GNOME custom shortcut ("Agent Deck" in Settings > Keyboard > Custom Shortcuts) that runs `agent-deck toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `agent-deck shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
+- `modisa toggle | show | hide` does the same from a terminal or script.
+- **GNOME on Wayland** doesn't let an app catch a key while another app has focus, so run `modisa shortcut` once. It adds a GNOME custom shortcut ("Modisa" in Settings > Keyboard > Custom Shortcuts) that runs `modisa toggle`, and the panel stops grabbing the key itself so one press never toggles twice. `modisa shortcut off` removes it. On other desktops and macOS the panel registers the key itself.
 
 ## Permission mode
 
@@ -236,9 +238,9 @@ The **gear** in the panel header opens the settings; Esc or the gear goes back.
 - Notifications on/off, and how long a session must work before "Done, your turn" notifies
 - Context warning threshold
 - Theme: System (follows the desktop), Dark or Light
-- The show/hide shortcut (read-only; `agent-deck shortcut` sets it up on GNOME)
+- The show/hide shortcut (read-only; `modisa shortcut` sets it up on GNOME)
 
-Each change is saved to `~/.agent-deck/config.json` immediately.
+Each change is saved to `~/.modisa/config.json` immediately.
 
 ## Notifications
 
@@ -296,28 +298,28 @@ Each card shows how full the session's context window is (`ctx 59%`; hover for t
 
 ## Ubuntu notes
 
-- On Ubuntu 23.10+ run this once after `npm install` (Ubuntu blocks Electron's usual sandbox; `agent-deck widget` reminds you if needed):
+- On Ubuntu 23.10+ run this once after `npm install` (Ubuntu blocks Electron's usual sandbox; `modisa widget` reminds you if needed):
   `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox`
-- The panel draws without the GPU sandbox on Linux, because the GPU process crashes on recent Ubuntu and leaves the window invisible. `AGENT_DECK_GPU=1` restores Electron's defaults. If the panel ever doesn't appear, `bash test/try-display.sh` tries the alternatives.
+- The panel draws without the GPU sandbox on Linux, because the GPU process crashes on recent Ubuntu and leaves the window invisible. `MODISA_GPU=1` restores Electron's defaults. If the panel ever doesn't appear, `bash test/try-display.sh` tries the alternatives.
 
-- Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this: `agent-deck widget` and autostart start Electron with `--ozone-platform=x11`, and if you start `electron widget/main.cjs` yourself without it, the panel restarts itself once with it. (Setting it from inside the app has no effect in Electron 45.) If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `AGENT_DECK_WAYLAND=1` to try native Wayland. Native Wayland can't stay on top, and its position can't be set or remembered.
+- Ubuntu's default Wayland session doesn't let apps keep themselves on top. The panel runs through XWayland to get around this: `modisa widget` and autostart start Electron with `--ozone-platform=x11`, and if you start `electron widget/main.cjs` yourself without it, the panel restarts itself once with it. (Setting it from inside the app has no effect in Electron 45.) If it still doesn't stay on top, log in with **"Ubuntu on Xorg"** (gear icon on the login screen), or set `MODISA_WAYLAND=1` to try native Wayland. Native Wayland can't stay on top, and its position can't be set or remembered.
 - Drag the panel anywhere, on either screen; it opens there next time (top right of the main screen the first time).
 - "Jump to session" switches tmux panes and focuses VS Code. For other terminals on Linux it can't raise the window yet.
 
 ## Commands
 
 ```
-agent-deck install | uninstall
-agent-deck widget | autostart [off]
-agent-deck toggle | show | hide          # the running panel
-agent-deck shortcut [off]                # GNOME: Ctrl+Alt+A everywhere
-agent-deck status
-agent-deck share [ip] | unshare
-agent-deck add-hub <name> <ws://host:port> <token> | remove-hub <name>
-agent-deck start | stop | restart        # the daemon
+modisa install | uninstall
+modisa widget | autostart [off]
+modisa toggle | show | hide          # the running panel
+modisa shortcut [off]                # GNOME: Ctrl+Alt+A everywhere
+modisa status
+modisa share [ip] | unshare
+modisa add-hub <name> <ws://host:port> <token> | remove-hub <name>
+modisa start | stop | restart        # the daemon
 ```
 
-## Config: `~/.agent-deck/config.json`
+## Config: `~/.modisa/config.json`
 
 | key | default | meaning |
 | --- | --- | --- |
@@ -329,7 +331,7 @@ agent-deck start | stop | restart        # the daemon
 | `hubs` | `[]` | other machines this panel shows (managed by `add-hub`) |
 | `approvalsInWidget` | true | the shield button |
 | `shortcut` | `Control+Alt+A` | shows/hides the panel |
-| `shortcutVia` | none | `gnome` after `agent-deck shortcut` (the panel then doesn't grab the key) |
+| `shortcutVia` | none | `gnome` after `modisa shortcut` (the panel then doesn't grab the key) |
 | `theme` | `system` | `system`, `dark` or `light` |
 | `notifications` | true | desktop notifications (also in the tray menu) |
 | `notifyAfterSeconds` | 30 | "Done, your turn" only after this much work |
@@ -343,7 +345,7 @@ agent-deck start | stop | restart        # the daemon
 ## Try it without real agents
 
 ```bash
-agent-deck widget
+modisa widget
 node test/demo.mjs          # four fake sessions, one approval, one question. Ctrl+C ends them.
 ```
 
@@ -356,17 +358,17 @@ npm test                    # end-to-end checks: hook script -> daemon -> fake p
 ## Uninstall
 
 ```bash
-agent-deck autostart off
-agent-deck uninstall        # removes only Agent Deck's hooks (backs up settings.json first) and stops the daemon
-rm -rf ~/.agent-deck
+modisa autostart off
+modisa uninstall        # removes only Modisa's hooks (backs up settings.json first) and stops the daemon
+rm -rf ~/.modisa
 ```
 
 ## If you change Node versions
 
-The hooks point at the exact `node` binary used during `agent-deck install`. If you switch Node versions (nvm) or move the folder, run `agent-deck install` again.
+The hooks point at the exact `node` binary used during `modisa install`. If you switch Node versions (nvm) or move the folder, run `modisa install` again.
 
 ## Files and logs
 
-- `~/.agent-deck/daemon.log`: daemon log
-- `~/.agent-deck/state.json`: sessions, so a daemon restart doesn't lose track of running ones
-- `~/.claude/settings.json.agent-deck-backup-*`: backups made by install/uninstall
+- `~/.modisa/daemon.log`: daemon log
+- `~/.modisa/state.json`: sessions, so a daemon restart doesn't lose track of running ones
+- `~/.claude/settings.json.modisa-backup-*`: backups made by install/uninstall

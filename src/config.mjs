@@ -1,11 +1,12 @@
 // Shared configuration for the daemon, hook script and widget.
-// Everything lives in ~/.agent-deck/ (override with AGENT_DECK_HOME).
+// Everything lives in ~/.modisa/ (override with MODISA_HOME).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { resolveHome } from './legacy.mjs';
 
-export const HOME = process.env.AGENT_DECK_HOME || path.join(os.homedir(), '.agent-deck');
+export const HOME = resolveHome();
 export const CONFIG_PATH = path.join(HOME, 'config.json');
 export const STATE_PATH = path.join(HOME, 'state.json');
 export const LOG_PATH = path.join(HOME, 'daemon.log');
@@ -45,7 +46,7 @@ export const DEFAULTS = {
   window: null,
   // Widget only: key that shows/hides the panel (Electron accelerator syntax).
   shortcut: 'Control+Alt+A',
-  // 'gnome' once `agent-deck shortcut` made GNOME run it; the panel then doesn't grab it itself.
+  // 'gnome' once `modisa shortcut` made GNOME run it; the panel then doesn't grab it itself.
   shortcutVia: null,
   // Widget only: hidden with the tray icon / shortcut when it last closed.
   panelHidden: false,
@@ -65,8 +66,8 @@ export function loadConfig() {
   let raw = {};
   try { raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {}
   const cfg = { ...DEFAULTS, ...raw };
-  if (process.env.AGENT_DECK_PORT) cfg.port = Number(process.env.AGENT_DECK_PORT);
-  if (process.env.AGENT_DECK_BIND) cfg.bind = process.env.AGENT_DECK_BIND;
+  if (process.env.MODISA_PORT) cfg.port = Number(process.env.MODISA_PORT);
+  if (process.env.MODISA_BIND) cfg.bind = process.env.MODISA_BIND;
   return cfg;
 }
 
@@ -92,7 +93,7 @@ export function newToken() {
   return crypto.randomBytes(24).toString('base64url');
 }
 
-// ---------- other machines' daemons ("hubs"), for `agent-deck add-hub` and the panel's settings ----------
+// ---------- other machines' daemons ("hubs"), for `modisa add-hub` and the panel's settings ----------
 // Address: "100.101.102.103", "host:47615", "ws://host:47615" or "wss://…"; the port defaults to 47615.
 export function hubUrl(input) {
   let s = String(input || '').trim();
@@ -111,7 +112,7 @@ export function addHub(name, address, token) {
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(name)) return { ok: false, error: 'Name: letters, digits, dot, dash or underscore' };
   const url = hubUrl(address);
   if (!url) return { ok: false, error: 'Address: an IP or host name, optionally with :port (or ws://host:port)' };
-  if (token && !/^[A-Za-z0-9._~+/=-]{8,200}$/.test(token)) return { ok: false, error: 'Token: paste it exactly as "agent-deck share" printed it' };
+  if (token && !/^[A-Za-z0-9._~+/=-]{8,200}$/.test(token)) return { ok: false, error: 'Token: paste it exactly as "modisa share" printed it' };
   const hubs = (loadConfig().hubs || []).filter((h) => h.name !== name && hubUrl(h.url) !== url); // one entry per machine
   hubs.push({ name, url, token: token || null });
   saveConfig({ hubs });
