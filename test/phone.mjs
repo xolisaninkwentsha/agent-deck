@@ -10,6 +10,9 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 import { createPhone, DEFAULT_RELAY_URL } from '../src/phone.mjs';
+import { createRelay } from '../relay/src/core.js';
+import { MemoryStore } from '../relay/src/memory-store.js';
+import { parseWebhook } from '../relay/src/whatsapp.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Never your own daemon (47615) or the live-test harness (47690).
@@ -36,16 +39,22 @@ async function fakeRelay() {
       break;
     } catch { /* port busy, retry */ }
   }
-  const relay = { url: `ws://127.0.0.1:${port}`, auths: [], got: [], socks: [], connections: 0 };
+  // behave(ws, n): what to do with the n-th connection (1-based); reply(msg, ws): answer a message.
+  const relay = { url: `ws://127.0.0.1:${port}`, auths: [], got: [], socks: [], connections: 0, opened: [], closed: [], behave: null, reply: null };
   wss.on('connection', (ws, req) => {
-    relay.connections++;
+    const n = ++relay.connections;
+    relay.opened[n - 1] = Date.now();
     relay.auths.push(req.headers.authorization);
     relay.socks.push(ws);
+    ws.on('close', () => { relay.closed[n - 1] = Date.now(); });
     ws.on('message', (d) => {
       const s = d.toString();
       if (s === 'ping') return ws.send('pong');
-      relay.got.push(JSON.parse(s));
+      const m = JSON.parse(s);
+      relay.got.push(m);
+      if (relay.reply) relay.reply(m, ws);
     });
+    if (relay.behave) relay.behave(ws, n);
   });
   relay.send = (o) => relay.socks.at(-1).send(JSON.stringify(o));
   relay.of = (type) => relay.got.filter((m) => m.type === type);
@@ -69,13 +78,115 @@ function setup(relay, over = {}) {
   return t;
 }
 const LINKED = { type: 'status', linked: true, number: '+27•••••4567', balanceMicroUsd: 5000, billing: 'trial', botNumber: '27600000000' };
-async function linked(t, relay) {
+const UNLINKED = { type: 'status', linked: false, number: null, balanceMicroUsd: null, billing: 'trial', botNumber: '27600000000' };
+// The link is up only while linking or linked: start a link, then the relay says it's linked.
+const startLink = (t, number = '+27820000000') => t.phone.panelMessage({ type: 'phone-link', number });
+async function connecting(t) {
   t.phone.start();
+  startLink(t);
   await until(() => t.phone.view().connected, 'connect');
+}
+async function linked(t, relay) {
+  await connecting(t);
   relay.send(LINKED);
   await until(() => t.phone.view().linked, 'linked');
 }
+// A machine linked on an earlier run: phone.json says so, and start() connects by itself.
+function linkedOnDisk(t, over = {}) {
+  const st = { key: crypto.randomBytes(32).toString('base64url'), relay: '', enabled: true, mode: 'away', lastStatus: { ...LINKED, type: undefined }, ...over };
+  fs.writeFileSync(path.join(t.home, 'phone.json'), JSON.stringify(st), { mode: 0o600 });
+  return st;
+}
 const pend = (o) => ({ id: 'p1', hookEvent: 'PreToolUse', toolName: 'Bash', toolInput: { command: 'ls' }, project: 'proj', questions: null, createdAt: 1_000_000, expiresAt: 1_000_000 + 90000, ...o });
+
+// ---------- the real relay core behind a WebSocket server, driven by the real phone client ----------
+// Connections are keyed by the hash of the Bearer key, as the Worker and relay-do.js do; each
+// connection's messages are handled one at a time, in order, as the Durable Object does.
+const META_NUMBER_ID = 'PN-TEST';
+async function realRelay(config) {
+  const store = new MemoryStore();
+  const outbound = []; // what would have gone to WhatsApp
+  const sender = { send: async (p) => { outbound.push(p); return { ok: true, id: 'wamid.out' + outbound.length }; } };
+  const relay = createRelay({ store, sender, config });
+  const port = await freePort(['127.0.0.1']);
+  const socks = new Map(); // keyHash -> open socket
+  const server = { url: `ws://127.0.0.1:${port}/link`, store, outbound, connections: 0 };
+  const wss = new WebSocketServer({
+    port, host: '127.0.0.1', path: '/link',
+    verifyClient: (info) => /^Bearer [A-Za-z0-9_-]{43}$/.test(info.req.headers.authorization || ''),
+  });
+  await new Promise((res, rej) => { wss.once('listening', res); wss.once('error', rej); });
+  wss.on('connection', (ws, req) => {
+    server.connections++;
+    const keyHash = crypto.createHash('sha256').update(req.headers.authorization.slice(7)).digest('hex');
+    const older = socks.get(keyHash);
+    socks.set(keyHash, ws);
+    if (older) older.close(4000, 'replaced');
+    let chain = Promise.resolve();
+    ws.on('message', (d) => {
+      const s = d.toString();
+      if (s === 'ping') return ws.send('pong');
+      chain = chain.then(async () => {
+        for (const reply of await relay.machineMessage(keyHash, JSON.parse(s))) ws.send(JSON.stringify(reply));
+      });
+    });
+    ws.on('close', () => { if (socks.get(keyHash) === ws) socks.delete(keyHash); });
+  });
+  // Meta's webhook as the Worker forwards it: parsed for our number, then routed to the machines.
+  server.inbound = async (message) => {
+    const body = { object: 'whatsapp_business_account', entry: [{ id: 'WABA', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', metadata: { phone_number_id: META_NUMBER_ID }, messages: [message] } }] }] };
+    for (const { keyHash, msg, expiresAt } of await relay.webhook(parseWebhook(body, META_NUMBER_ID))) {
+      const ws = socks.get(keyHash);
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      else await relay.queue(keyHash, msg, expiresAt);
+    }
+  };
+  server.close = () => new Promise((res) => { for (const c of wss.clients) c.terminate(); wss.close(() => res()); });
+  cleanups.push(server.close);
+  return server;
+}
+
+async function integration() {
+  const PRICE = 1000; // test values, not anyone's real rates
+  const TRIAL = 50000;
+  const config = { botNumber: '27600000000', billing: 'trial', trialMicroUsd: TRIAL, rates: { default: PRICE }, markupPercent: 0, hourlyCap: 60, codeTtlMs: 600000, windowMs: 86400000, template: { name: 't', lang: 'en' } };
+  const server = await realRelay(config);
+  const t = setup({ url: server.url }, { now: Date.now });
+  const from = '27821234567';
+  const ts = () => String(Math.floor(Date.now() / 1000));
+
+  t.phone.start();
+  await sleep(200);
+  assert.equal(server.connections, 0);
+  startLink(t, '+27 82 123 4567');
+  await until(() => t.phone.view().code, 'a link code from the relay core');
+  const { code } = t.phone.view().code;
+  assert.match(code, /^[A-Z0-9]{8}$/);
+  await server.inbound({ from, id: 'wamid.in1', timestamp: ts(), type: 'text', text: { body: code } });
+  await until(() => t.phone.view().linked, 'linked through the relay core');
+  let v = t.phone.view();
+  assert.deepEqual([v.enabled, v.number, v.billing, v.botNumber, v.balanceMicroUsd], [true, '+27•••••4567', 'trial', '27600000000', TRIAL - PRICE]);
+  assert.equal(server.outbound.at(-1).text.body, 'Connected: testbox');
+
+  const now = Date.now();
+  t.phone.consider([pend({ id: 'int1', createdAt: now, expiresAt: now + 90000, toolInput: { command: 'npm publish --token=npm_abcdefghijklmnop1234' } })], true);
+  await until(() => t.phone.view().sent.int1 === 'sent', 'prompt-sent from the relay core');
+  assert.equal(t.phone.view().balanceMicroUsd, TRIAL - 2 * PRICE, 'Settings shows the charge');
+  const msg = server.outbound.at(-1);
+  assert.equal(msg.type, 'interactive');
+  assert.ok(!JSON.stringify(msg).includes('abcdefghijklmnop'), 'masked before it left the machine');
+  const allow = msg.interactive.action.buttons.find((b) => b.reply.title === 'Allow').reply.id;
+  await server.inbound({ from, id: 'wamid.in2', timestamp: ts(), type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: allow, title: 'Allow' } } });
+  await until(() => t.decided.length === 1, 'the decide reached the phone client');
+  assert.deepEqual(t.decided[0], ['int1', { behavior: 'allow' }]);
+  const ref = await server.store.get('pending:' + crypto.createHash('sha256').update(JSON.parse(fs.readFileSync(path.join(t.home, 'phone.json'), 'utf8')).key).digest('hex') + ':int1');
+  for (let i = 0; i < 100 && (await server.store.get('prompt:' + ref)).state !== 'closed'; i++) await sleep(10);
+  assert.deepEqual([(await server.store.get('prompt:' + ref)).closedWhy], ['answered-phone'], 'the decide-ack closed it on the relay');
+  v = t.phone.view();
+  assert.equal(v.balanceMicroUsd, (await server.store.get('account:' + from)).balance);
+  check('integration: link with a code, prompt, tap Allow, decide reaches the client, credit follows (real relay core)');
+  t.phone.stop();
+}
 
 // ---------- a real daemon with the phone wired in ----------
 async function runCleanups() {
@@ -141,7 +252,7 @@ async function startDaemon({ name, key, relay, bind, token, env = {} }) {
   fs.mkdirSync(path.join(claude, 'sessions'), { recursive: true });
   fs.writeFileSync(path.join(home, 'crontab'), '');
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ port, name, otlpPort: 0, ...(bind ? { bind, token } : {}) }));
-  if (relay) fs.writeFileSync(path.join(home, 'phone.json'), JSON.stringify({ key, relay: relay.url, enabled: true, mode: 'away', lastStatus: null }), { mode: 0o600 });
+  if (relay) fs.writeFileSync(path.join(home, 'phone.json'), JSON.stringify({ key, relay: relay.url, enabled: true, mode: 'away', lastStatus: { linked: true, number: '+27•••••4567', balanceMicroUsd: 1000000, billing: 'trial', botNumber: '27000000000' } }), { mode: 0o600 });
   const awayFile = path.join(home, 'away.json');
   const d = { home, port, name, awayFile, logFile: path.join(home, 'daemon.log') };
   d.away = (idleMs) => fs.writeFileSync(awayFile, JSON.stringify({ idleMs, locked: false }));
@@ -399,6 +510,18 @@ async function daemonChecks() {
   assert.equal(relay.of('prompt-closed', m10.pendingId)[0].why, 'timeout');
   check('a failed send hands a PreToolUse question back to the terminal on the next tick');
 
+  // The relay accepted it, then it died (the next question couldn't be sent, or Meta said failed).
+  const lateQ = [{ question: 'Which branch?', header: 'Branch', multiSelect: false, options: [{ label: 'main' }, { label: 'dev' }] }];
+  const h10b = ask(d, { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', permission_mode: 'bypassPermissions', tool_use_id: 'q-late-fail', tool_input: { questions: lateQ } });
+  await until(() => relay.of('prompt').at(-1)?.prompt?.questions?.[0]?.question === 'Which branch?', 'the question on the relay', 8000);
+  const m10b = relay.of('prompt').at(-1);
+  relay.send({ type: 'prompt-sent', pendingId: m10b.pendingId, balanceMicroUsd: 999000 });
+  await sleep(1500);
+  assert.equal(hookKids.has(h10b.child), true, 'still held while it is on the phone');
+  relay.send({ type: 'prompt-failed', pendingId: m10b.pendingId, reason: 'send-failed', balanceMicroUsd: 999000 });
+  assert.equal((await within(h10b, 6000, 'the question handed back after it failed on the phone')).out, '');
+  check('a prompt that fails after prompt-sent hands a PreToolUse question back too');
+
   const log = fs.readFileSync(d.logFile, 'utf8');
   for (const text of [secret, 'curl', 'npm publish', 'git push', 'terraform', 'Which region']) assert.ok(!log.includes(text), `daemon log has ${text}`);
   check('daemon log carries no prompt text');
@@ -479,8 +602,7 @@ async function main() {
   {
     const relay = await fakeRelay();
     const t = setup(relay);
-    t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
+    await connecting(t);
     const file = path.join(t.home, 'phone.json');
     const st = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
@@ -495,6 +617,7 @@ async function main() {
     t.phone.stop();
     const again = createPhone({ home: t.home, machineName: 'x', log() {}, onChange() {}, decide() {}, extendHold() {}, relayUrl: relay.url });
     again.start();
+    again.panelMessage({ type: 'phone-link', number: '+27820000000' });
     await until(() => relay.auths.length === 2, 'second connect');
     assert.equal(relay.auths[1], 'Bearer ' + st.key);
     again.stop();
@@ -520,9 +643,9 @@ async function main() {
     const relay = await fakeRelay();
     const t = setup(relay);
     t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
     t.phone.panelMessage({ type: 'phone-link', number: '  +27•••••4567 ' });
     await until(() => relay.of('link-start').length === 1, 'link-start');
+    assert.deepEqual(relay.got.map((m) => m.type), ['hello', 'link-start'], 'phone-link connects, says hello, then asks for a code');
     assert.equal(relay.of('link-start')[0].number, '+27•••••4567');
     relay.send({ type: 'link-code', code: 'ABCD2345', expiresAt: 123, botNumber: '27600000000' });
     await until(() => t.phone.view().code, 'code');
@@ -572,8 +695,7 @@ async function main() {
     const relay = await fakeRelay();
     const relay2 = await fakeRelay();
     const t = setup(relay);
-    t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
+    await connecting(t);
     t.phone.panelMessage({ type: 'phone-settings', enabled: 'yes', mode: 'bogus', relay: 'http://x' });
     let v = t.phone.view();
     assert.equal(v.enabled, false); assert.equal(v.mode, 'away'); assert.equal(v.relay, relay.url);
@@ -583,9 +705,13 @@ async function main() {
     const st = JSON.parse(fs.readFileSync(path.join(t.home, 'phone.json'), 'utf8'));
     assert.equal(st.enabled, true); assert.equal(st.mode, 'everything');
     t.phone.panelMessage({ type: 'phone-settings', relay: relay2.url });
-    await until(() => relay2.connections === 1, 'reconnect to new relay');
     assert.equal(t.phone.view().relay, relay2.url);
-    check('settings: invalid fields ignored, valid persisted, relay change reconnects');
+    await until(() => relay.socks[0].readyState === WebSocket.CLOSED, 'the old relay dropped');
+    await sleep(200);
+    assert.equal(relay2.connections, 0, 'the new relay isn\'t contacted until a link starts');
+    startLink(t);
+    await until(() => relay2.connections === 1, 'the next link uses the new relay');
+    check('settings: invalid fields ignored, valid persisted; a relay change drops the link and the next link uses the new relay');
   }
 
   // rules
@@ -685,8 +811,7 @@ async function main() {
     const relay = await fakeRelay();
     const t = setup(relay);
     const acks = () => relay.of('decide-ack');
-    t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
+    await connecting(t);
     // unlinked: refused
     relay.send({ type: 'decide', pendingId: 'p9', decision: { behavior: 'allow' } });
     await until(() => acks().length === 1, 'ack unlinked');
@@ -756,8 +881,7 @@ async function main() {
     const relay = await fakeRelay();
     let boom = false;
     const t = setup(relay, { onChange: () => { if (boom) throw new Error('boom'); } });
-    t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
+    await connecting(t);
     boom = true;
     relay.send(LINKED);
     await until(() => t.phone.view().linked, 'linked despite throwing onChange');
@@ -780,8 +904,10 @@ async function main() {
     cleanups.push(() => new Promise((r) => { for (const x of socks) x.destroy(); srv.close(r); }));
     const t = setup({ url: `ws://127.0.0.1:${srv.address().port}` }, { handshakeTimeout: 200 });
     t.phone.start();
+    startLink(t);
     await until(() => conns >= 2, 'retry after handshake timeout', 6000);
     assert.equal(t.phone.view().connected, false);
+    assert.equal(t.phone.view().error, 'relay-unreachable', 'a link that can\'t connect says so');
     check('handshake: a server that never upgrades times out and the client retries');
   }
 
@@ -789,8 +915,7 @@ async function main() {
   {
     const relay = await fakeRelay();
     const t = setup(relay);
-    t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
+    await connecting(t);
     for (const bad of ['ws://example.com/link', 'http://x', 'wss://', 'garbage']) {
       t.phone.panelMessage({ type: 'phone-settings', relay: bad });
       assert.equal(t.phone.view().relay, relay.url, bad);
@@ -799,6 +924,7 @@ async function main() {
     t.phone.panelMessage({ type: 'phone-settings', relay: ` ${relay.url}/link ` });
     assert.equal(t.phone.view().relay, `${relay.url}/link`);
     assert.equal(t.phone.view().error, '');
+    startLink(t);
     await until(() => relay.connections === 2, 'reconnect with loopback ws');
     t.phone.panelMessage({ type: 'phone-settings', relay: 'wss://relay.example.com/link' });
     assert.equal(t.phone.view().relay, 'wss://relay.example.com/link');
@@ -821,6 +947,9 @@ async function main() {
     assert.equal(t.phone.view().enabled, true);
     await until(() => relay.auths.length === 1, 'auth');
     t.phone.panelMessage({ type: 'phone-settings', relay: relay2.url });
+    await sleep(200);
+    assert.equal(relay2.connections, 0, 'unlinked by the change: no connection to the new relay yet');
+    startLink(t);
     await until(() => relay2.connections === 1, 'second relay');
     assert.notEqual(relay2.auths[0], relay.auths[0]);
     const v = t.phone.view();
@@ -836,8 +965,7 @@ async function main() {
     const relay = await fakeRelay();
     const t = setup(relay);
     assert.equal(t.phone.isApprover(true), false);
-    t.phone.start();
-    await until(() => t.phone.view().connected, 'connect');
+    await connecting(t);
     assert.equal(t.phone.isApprover(true), false);
     relay.send(LINKED);
     await until(() => t.phone.view().linked, 'linked');
@@ -883,6 +1011,212 @@ async function main() {
     assert.equal(relay.connections, 1);
     check('stop: closes and does not reconnect');
   }
+
+  // ---------- the link is up only while linking or linked ----------
+  const closedOn = (relay, i) => relay.socks[i]?.readyState === WebSocket.CLOSED;
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay, { backoffMinMs: 50 });
+    t.phone.start();
+    await sleep(300);
+    assert.equal(relay.connections, 0, 'a relay is configured, but nothing is linked or linking');
+    assert.deepEqual([t.phone.view().connected, t.phone.view().error], [false, '']);
+    startLink(t);
+    await until(() => relay.of('link-start').length === 1, 'phone-link connects');
+    t.phone.panelMessage({ type: 'phone-cancel-link' });
+    await until(() => closedOn(relay, 0), 'the link dropped after cancel');
+    await sleep(300);
+    assert.equal(relay.connections, 1, 'and stays down');
+    assert.equal(t.phone.view().connected, false);
+    check('relay link: none until phone-link; phone-link connects; cancel disconnects for good');
+  }
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay, { backoffMinMs: 50, linkWindowMs: 500 });
+    t.phone.start();
+    startLink(t);
+    await until(() => relay.of('link-start').length === 1, 'link-start');
+    relay.send({ type: 'link-code', code: 'ABCD2345', expiresAt: t.now + 600000, botNumber: '27600000000' });
+    await until(() => t.phone.view().code, 'code');
+    await until(() => closedOn(relay, 0), 'the link dropped when the code\'s time ran out', 3000);
+    await sleep(300);
+    assert.equal(relay.connections, 1);
+    assert.equal(t.phone.view().code.code, 'ABCD2345', 'the code stays, shown as expired');
+    check('relay link: dropped when the link code\'s time runs out');
+  }
+  {
+    const relay = await fakeRelay();
+    relay.reply = (m, ws) => { if (m.type === 'unlink') ws.send(JSON.stringify(UNLINKED)); };
+    const t = setup(relay, { backoffMinMs: 50 });
+    await linked(t, relay);
+    t.phone.panelMessage({ type: 'phone-unlink' });
+    await until(() => closedOn(relay, 0), 'the link dropped after unlink');
+    await sleep(300);
+    assert.equal(relay.connections, 1);
+    assert.deepEqual([t.phone.view().linked, t.phone.view().enabled], [false, false]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(t.home, 'phone.json'), 'utf8')).lastStatus.linked, false);
+    // A relay that never answers the unlink: forgotten here after the reply deadline anyway.
+    const quiet = await fakeRelay();
+    const q = setup(quiet, { backoffMinMs: 50, replyMs: 200 });
+    await linked(q, quiet);
+    q.phone.panelMessage({ type: 'phone-unlink' });
+    await until(() => closedOn(quiet, 0) && !q.phone.view().linked, 'unlinked locally after no answer', 3000);
+    await sleep(300);
+    assert.equal(quiet.connections, 1);
+    check('relay link: dropped after unlink (on the relay\'s answer, or after 20 s without one)');
+  }
+  {
+    // Linked on an earlier run: start() connects. A hello answered "unlinked" ("stop" while away) drops it.
+    const relay = await fakeRelay();
+    let hello = LINKED;
+    relay.reply = (m, ws) => { if (m.type === 'hello') ws.send(JSON.stringify(hello)); };
+    const t = setup(relay, { backoffMinMs: 50 });
+    linkedOnDisk(t);
+    t.phone.start();
+    await until(() => t.phone.view().connected && t.phone.view().linked, 'connected at start');
+    hello = UNLINKED;
+    relay.socks[0].terminate();
+    await until(() => relay.connections === 2 && closedOn(relay, 1), 'reconnected, told unlinked, dropped');
+    await sleep(300);
+    assert.equal(relay.connections, 2);
+    assert.equal(t.phone.view().linked, false);
+    // junk in phone.json's lastStatus never counts as linked
+    const junk = setup(relay, { backoffMinMs: 50 });
+    linkedOnDisk(junk, { lastStatus: { linked: 'yes', number: 5, billing: 'gold' } });
+    junk.phone.start();
+    await sleep(300);
+    assert.equal(relay.connections, 2);
+    assert.deepEqual([junk.phone.view().linked, junk.phone.view().number, junk.phone.view().billing], [false, null, null]);
+    check('relay link: a machine linked on disk connects at start; an unlinked status drops it');
+  }
+  {
+    // Close code 4000: a newer connection with this key took over.
+    const relay = await fakeRelay();
+    const t = setup(relay, { backoffMinMs: 50, replacedBackoffMs: 700 });
+    await linked(t, relay);
+    const t0 = Date.now();
+    relay.socks[0].close(4000, 'replaced');
+    await until(() => t.phone.view().error === 'in-use-elsewhere', 'in-use-elsewhere');
+    await sleep(300);
+    assert.equal(relay.connections, 1, 'not straight back (the normal backoff here is 50 ms)');
+    await until(() => relay.connections === 2, 'back after the long wait', 3000);
+    assert.ok(Date.now() - t0 >= 650, 'waited the in-use backoff');
+    assert.equal(t.phone.view().error, 'in-use-elsewhere', 'still shown until the link has stayed up');
+    check('replaced (4000): error in-use-elsewhere and a long backoff (5 min by default)');
+  }
+  {
+    // Accept, then close at once: the backoff keeps growing, since no connection stays up 30 s.
+    const relay = await fakeRelay();
+    relay.behave = (ws) => ws.close();
+    const t = setup(relay, { backoffMinMs: 40, backoffMaxMs: 5000 });
+    linkedOnDisk(t);
+    t.phone.start();
+    await sleep(1000);
+    t.phone.stop();
+    // 0, 40, 120, 280, 600 ms (then 1240): about 5. Reset on every open would make it about 20.
+    assert.ok(relay.connections >= 3 && relay.connections <= 7, `connections: ${relay.connections}`);
+    check('backoff: not reset by a connection that closes straight away');
+  }
+  {
+    // A connection that stays up (150 ms here) resets it: the next try comes after the minimum.
+    const relay = await fakeRelay();
+    relay.behave = (ws, n) => { if (n <= 4) ws.close(); else if (n === 5) setTimeout(() => ws.close(), 400); };
+    const t = setup(relay, { backoffMinMs: 40, backoffMaxMs: 5000, stableMs: 150 });
+    linkedOnDisk(t);
+    t.phone.start();
+    await until(() => relay.connections === 6, 'the sixth connection', 6000);
+    const gap = relay.opened[5] - relay.closed[4];
+    assert.ok(gap < 400, `reconnected ${gap} ms after a stable connection closed (640 ms without the reset)`);
+    check('backoff: reset once a connection has stayed up (30 s by default)');
+  }
+
+  // ---------- prompts the relay never answers; balances; relay fields ----------
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay, { replyMs: 200 });
+    await linked(t, relay);
+    t.phone.consider([pend({ id: 'n1' }), pend({ id: 'n2', hookEvent: 'PermissionRequest', expiresAt: 1_000_000 + 300000 })], true);
+    await until(() => relay.of('prompt').length === 2, 'two prompts');
+    relay.send({ type: 'prompt-sent', pendingId: 'n2' });
+    const before = t.changes;
+    await until(() => t.phone.view().sent.n1 === 'failed:no-reply', 'no-reply after the deadline', 3000);
+    assert.ok(t.changes > before, 'onChange told');
+    await sleep(300);
+    assert.equal(t.phone.view().sent.n2, 'sent', 'a confirmed prompt never times out');
+    relay.send({ type: 'prompt-sent', pendingId: 'n1' });
+    await until(() => t.phone.view().sent.n1 === 'sent', 'a late prompt-sent: the phone has it after all');
+    check('a prompt with no prompt-sent or prompt-failed in 20 s is failed:no-reply');
+
+    relay.send({ type: 'prompt-failed', pendingId: 'n2', reason: 'send-failed' });
+    await until(() => t.phone.view().sent.n2 === 'failed:send-failed', 'failed after sent');
+    relay.send({ type: 'prompt-failed', pendingId: 'ghost', reason: 'send-failed' });
+    t.phone.closed('n1', 'answered');
+    relay.send({ type: 'prompt-failed', pendingId: 'n1', reason: 'send-failed' });
+    relay.send({ type: 'prompt-sent', pendingId: 'n2' });
+    await sleep(150);
+    assert.deepEqual(t.phone.view().sent, { n2: 'failed:send-failed' }, 'nothing kept for unknown or closed prompts; a failure isn\'t undone');
+    check('prompt-failed after prompt-sent marks it failed; unknown or closed ids leave nothing');
+  }
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay);
+    await linked(t, relay);
+    const onDisk = () => JSON.parse(fs.readFileSync(path.join(t.home, 'phone.json'), 'utf8')).lastStatus.balanceMicroUsd;
+    t.phone.consider([pend({ id: 'm1' })], true);
+    await until(() => relay.of('prompt').length === 1, 'prompt');
+    relay.send({ type: 'prompt-sent', pendingId: 'm1', balanceMicroUsd: 4880 });
+    await until(() => t.phone.view().balanceMicroUsd === 4880, 'the credit drops after prompt-sent');
+    assert.equal(onDisk(), 4880);
+    relay.send({ type: 'decide', pendingId: 'm1', decision: { behavior: 'allow' }, balanceMicroUsd: 4760 });
+    await until(() => t.phone.view().balanceMicroUsd === 4760, 'and after decide');
+    relay.send({ type: 'prompt-failed', pendingId: 'other', reason: 'no-credit', balanceMicroUsd: 0 });
+    await until(() => t.phone.view().balanceMicroUsd === 0, 'and after prompt-failed');
+    for (const bad of ['lots', null, Infinity, { n: 1 }]) relay.send({ type: 'prompt-sent', pendingId: 'm1', balanceMicroUsd: bad });
+    await sleep(100);
+    assert.equal(t.phone.view().balanceMicroUsd, 0);
+    assert.equal(onDisk(), 0);
+    check('credit: prompt-sent, decide and prompt-failed update the balance in view() and phone.json');
+  }
+  {
+    // M3: a link that completes long after this machine asked doesn't turn approvals on by itself.
+    const relay = await fakeRelay();
+    const t = setup(relay);
+    t.phone.start();
+    startLink(t);
+    await until(() => relay.of('link-start').length === 1, 'link-start');
+    t.now += 11 * 60000;
+    relay.send(LINKED);
+    await until(() => t.phone.view().linked, 'linked');
+    assert.equal(t.phone.view().enabled, false);
+    check('a link that completes over 10 minutes after this machine\'s link-start leaves approvals off');
+  }
+  {
+    // M4: fields from the relay are type-checked before they're kept or shown.
+    const relay = await fakeRelay();
+    const t = setup(relay);
+    await connecting(t);
+    relay.send({ type: 'link-code', code: 12345, expiresAt: 1 });
+    relay.send({ type: 'link-code', code: 'ABCD2345', expiresAt: 'soon', botNumber: { x: 1 } });
+    await until(() => t.phone.view().code, 'a code');
+    assert.deepEqual(t.phone.view().code, { code: 'ABCD2345', expiresAt: t.now + 600000, botNumber: null });
+    relay.send({ type: 'error', reason: 'x'.repeat(500) });
+    await until(() => t.phone.view().error === 'error', 'a long reason is replaced');
+    relay.send({ type: 'error', reason: '<b>hi</b>' });
+    await sleep(50);
+    assert.equal(t.phone.view().error, 'error');
+    relay.send({ type: 'status', linked: true, number: 27821234567, balanceMicroUsd: '5000', billing: 'gold', botNumber: ['x'] });
+    await until(() => t.phone.view().linked, 'linked');
+    const v = t.phone.view();
+    assert.deepEqual([v.number, v.balanceMicroUsd, v.billing, v.botNumber], [null, null, null, null]);
+    t.phone.consider([pend({ id: 'k1' })], true);
+    await until(() => relay.of('prompt').length === 1, 'prompt');
+    relay.send({ type: 'prompt-failed', pendingId: 'k1', reason: 'a b; c' });
+    await until(() => t.phone.view().sent.k1, 'failed');
+    assert.equal(t.phone.view().sent.k1, 'failed:unknown');
+    check('relay fields are type-checked: number, botNumber and code strings, balance a number, billing known, reasons short words');
+  }
+
+  await integration();
 
   await daemonChecks();
 

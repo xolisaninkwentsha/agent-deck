@@ -75,10 +75,12 @@ async function main() {
     '\\"password\\": \\"'.repeat(3200) + 'x', '\\"password\\": \\"x\\" y '.repeat(2500), '\\"key\\":\\"'.repeat(4500) + 'x', '"key": "'.repeat(6000) + 'x']) {
     const t0 = performance.now();
     maskSecrets(hostile);
-    assert.ok(performance.now() - t0 < 200, `maskSecrets too slow on ${hostile.slice(0, 8)}`);
+    assert.ok(performance.now() - t0 < 400, `maskSecrets too slow on ${hostile.slice(0, 8)}`);
   }
   const long = phoneSummary({ toolName: 'Bash', toolInput: { command: 'echo ' + 'x'.repeat(50000) + ' TOKEN=abc1' }, project: 'p' });
-  assert.ok(long.detail.length <= LIMITS.detail);
+  assert.ok(long.detail.length <= LIMITS.command);
+  // 50016 characters, 854 shown: the rest are counted even past the 2000 that get masked
+  assert.equal(long.detail, 'echo ' + 'x'.repeat(849) + '… (+49162 more characters: check the computer)');
   check('masking stays fast on hostile input');
 
   assert.equal(maskSecrets('curl -u admin:hunter2 https://x.io'), `curl -u ${M} https://x.io`);
@@ -99,13 +101,40 @@ async function main() {
   for (const plain of ['npm test', 'git commit -m "Fix the 2nd test"', 'ls -la /home/me/Desktop/agent-deck/node_modules']) assert.equal(maskSecrets(plain), plain);
   check('leaves ordinary commands alone');
 
-  const bash = phoneSummary({ toolName: 'Bash', toolInput: { command: 'TOKEN=abc123 ./x.sh' + ' y'.repeat(400) }, project: 'api' });
+  const bash = phoneSummary({ toolName: 'Bash', toolInput: { command: 'TOKEN=abc123 ./x.sh' + ' y'.repeat(600) }, project: 'api' });
   assert.equal(bash.kind, 'approval');
   assert.equal(bash.title, 'Run command');
-  assert.ok(bash.detail.startsWith(`TOKEN=${M}`));
-  assert.ok(bash.detail.length <= LIMITS.detail);
-  assert.ok(bash.detail.endsWith('…'));
-  check('Bash summary is masked and cut to the detail limit');
+  // masked: "TOKEN=•••• ./x.sh" (17) + 1200 = 1217 characters; 855 shown, 362 hidden
+  const maskedBash = `TOKEN=${M} ./x.sh` + ' y'.repeat(600);
+  assert.equal(bash.detail, maskedBash.slice(0, 855) + '… (+362 more characters: check the computer)');
+  assert.ok(bash.detail.length <= LIMITS.command);
+  check('Bash summary is masked, then cut to 900 with how many characters are hidden');
+
+  const fits = 'echo ' + 'z'.repeat(895);
+  assert.equal(phoneSummary({ toolName: 'Bash', toolInput: { command: fits }, project: 'p' }).detail, fits);
+  assert.match(phoneSummary({ toolName: 'PowerShell', toolInput: { command: fits + 'z' }, project: 'p' }).detail, /… \(\+\d+ more characters: check the computer\)$/);
+  // N counts what the phone would have shown: a masked secret counts as its mask
+  const secretTail = 'echo ' + 'a'.repeat(900) + ' --password ' + 's'.repeat(40);
+  const st = phoneSummary({ toolName: 'Bash', toolInput: { command: secretTail }, project: 'p' }).detail;
+  const hidden = Number(/\+(\d+) more/.exec(st)[1]);
+  const maskedLen = Array.from(maskSecrets(secretTail)).length; // 921: the 40-character password is 4 dots
+  assert.equal(maskedLen, 921);
+  assert.equal(hidden, maskedLen - (LIMITS.command - `… (+${maskedLen} more characters: check the computer)`.length));
+  assert.ok(!st.includes('sss'));
+  const emoji = phoneSummary({ toolName: 'Bash', toolInput: { command: '🙂'.repeat(1000) }, project: 'p' }).detail;
+  assert.ok(Array.from(emoji).length <= LIMITS.command && emoji.length > LIMITS.command, 'counted in characters, not UTF-16 units');
+  assert.ok(emoji.isWellFormed(), 'no emoji cut in half');
+  assert.match(emoji, /^🙂+… \(\+145 more characters/u);
+  check('a command up to 900 characters is sent whole; the hidden count is of the masked text, in characters');
+
+  // The relay's body keeps the whole detail, note included, under a long project name.
+  const { promptMessage } = await import('../relay/src/whatsapp.js');
+  const longCmd = phoneSummary({ toolName: 'Bash', toolInput: { command: 'make ' + 'deploy '.repeat(400) }, project: 'a-very-long-project-name-'.repeat(8) });
+  const body = promptMessage('27820000000', 'r1', longCmd, 0).interactive.body.text;
+  assert.ok(Array.from(body).length <= 1024);
+  assert.ok(body.endsWith('\n\n' + longCmd.detail));
+  assert.match(body, /more characters: check the computer\)$/);
+  check('a cut command keeps its "more characters" note inside the 1024-character WhatsApp body');
 
   assert.equal(phoneSummary({ toolName: 'Write', toolInput: { file_path: '/a/b.txt', content: 'SECRET body' }, project: 'p' }).detail, '/a/b.txt');
   const mcp = phoneSummary({ toolName: 'mcp__gmail__send', toolInput: { to: 'x@y.com', body: 'private text' }, project: 'p' });

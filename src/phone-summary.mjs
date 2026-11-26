@@ -1,9 +1,12 @@
 // Turns a held Claude Code prompt into the short, secret-masked text sent to a phone.
 import { describeApproval } from './state.mjs';
 
-export const LIMITS = { detail: 300, plan: 900, question: 1000 };
-// Output is cut to a few hundred characters, so masking beyond this is wasted work (and bounds regex cost).
+// command: Bash/PowerShell, including the "… (+N more characters" note when cut. The relay's
+// 1024-character body keeps the whole detail and shortens the project name instead.
+export const LIMITS = { detail: 300, command: 900, plan: 900, question: 1000 };
+// Output is cut to at most 900 characters, so masking beyond this is wasted work (and bounds regex cost).
 const MASK_INPUT_MAX = 2000;
+const moreNote = (n) => `… (+${n} more characters: check the computer)`;
 
 const MASK = '••••';
 const SECRET_NAME = /token|key|secret|password|pass|auth/i;
@@ -63,9 +66,21 @@ function cut(text, max) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+// A command too long for the phone keeps its start and says how many characters are hidden, so
+// nobody approves a command thinking they've seen all of it. N counts the masked text, plus
+// whatever lies past the masking cap. Counted in code points, as the relay counts.
+function cutCommand(command) {
+  const chars = Array.from(String(command ?? ''));
+  const masked = Array.from(maskSecrets(chars.slice(0, MASK_INPUT_MAX).join('')));
+  const total = masked.length + Math.max(0, chars.length - MASK_INPUT_MAX);
+  if (total <= LIMITS.command) return masked.join('');
+  const shown = masked.slice(0, LIMITS.command - moreNote(total).length); // N <= total, so it fits
+  return shown.join('') + moreNote(total - shown.length);
+}
+
 // Detail is built from fields that are safe to show; mask first, then cut, so a cut never leaves half a secret.
 function detailFor(toolName, input) {
-  if (toolName === 'Bash' || toolName === 'PowerShell') return cut(maskSecrets((input.command || '').slice(0, MASK_INPUT_MAX)), LIMITS.detail);
+  if (toolName === 'Bash' || toolName === 'PowerShell') return cutCommand(input.command || '');
   if (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write') return cut(input.file_path || '', LIMITS.detail);
   if (toolName === 'WebFetch') return cut(maskSecrets((input.url || '').slice(0, MASK_INPUT_MAX)), LIMITS.detail);
   if (toolName === 'ExitPlanMode') return cut(input.plan || '', LIMITS.plan);

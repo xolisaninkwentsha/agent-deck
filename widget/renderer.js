@@ -105,10 +105,12 @@ const PHONE_ERRORS = {
   'rate-limited': 'Too many tries; wait an hour',
   'relay-unreachable': 'Can\'t reach the relay',
   'bad-relay': 'That relay address isn\'t valid (use wss://)',
+  'in-use-elsewhere': 'This machine\'s phone link is in use on another computer',
 };
 const PHONE_FAIL = {
   'no-credit': 'out of phone credit', 'rate-limited': 'hourly limit reached',
   'not-linked': 'phone not connected', 'send-failed': 'WhatsApp refused it',
+  'no-reply': 'the relay didn\'t answer', 'error': 'the relay hit an error',
 };
 // "sent" is left out: it changes with every prompt and would rebuild Settings each time.
 const phoneSig = (ph) => { if (!ph) return ''; const { sent, ...rest } = ph; return JSON.stringify(rest); };
@@ -130,7 +132,9 @@ function phoneView(row) {
     phoneSend({ type: 'phone-link', number });
   };
   const out = [h('div', { class: 'section-head', text: 'Phone (WhatsApp)' })];
-  let hint = ph.error ? (PHONE_ERRORS[ph.error] || 'Something went wrong') : !noRelay && !ph.connected ? PHONE_ERRORS['relay-unreachable'] : '';
+  // The daemon only keeps a relay link while linked (or linking, which reports its own errors), so
+  // an unlinked machine being offline is normal.
+  let hint = ph.error ? (PHONE_ERRORS[ph.error] || 'Something went wrong') : !noRelay && ph.linked && !ph.connected ? PHONE_ERRORS['relay-unreachable'] : '';
 
   if (noRelay) {
     out.push(h('div', { class: 'set-hint pad', text: 'Needs a relay address (below)' }));

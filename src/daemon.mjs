@@ -75,12 +75,14 @@ const widgets = new Set();
 
 // ---------- the phone (WhatsApp through the relay, see phone.mjs) ----------
 // The relay link counts as an approver while it's linked, enabled and connected, and either the
-// mode is "everything" or this machine is away. With no relay configured it never connects.
+// mode is "everything" or this machine is away. It connects only while this machine is linked or
+// a link is in progress, so with no relay configured, or never linked, it never connects.
+// Tests only: the "unanswered for 2 minutes" rule, shortened (1 to 120 s; anything else is ignored).
+const awayAfterEnv = Number(process.env.AGENT_DECK_PHONE_AWAY_AFTER_MS);
 const phone = createPhone({
   home: HOME, machineName: NAME, log, onChange: broadcast, decide: phoneDecide, extendHold,
   relayUrl: process.env.AGENT_DECK_RELAY, version: VERSION,
-  // Tests only: the "unanswered for 2 minutes" rule, shortened.
-  awayAfterMs: Number(process.env.AGENT_DECK_PHONE_AWAY_AFTER_MS) || undefined,
+  awayAfterMs: awayAfterEnv >= 1000 && awayAfterEnv <= 120000 ? awayAfterEnv : undefined,
 });
 const PHONE_HOLD_MS = 570000; // a PermissionRequest sent to the phone is held to createdAt + this
 const PRESENCE_MS = 60000; // a panel's presence report counts for this long
