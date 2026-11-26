@@ -1,11 +1,20 @@
-// Tests for the daemon's phone client, against a fake relay.
+// Tests for the daemon's phone client, against a fake relay, then a real daemon with the phone
+// wired in (a real hook script, a fake relay, panels over WebSocket).
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
-import { WebSocketServer } from 'ws';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import WebSocket, { WebSocketServer } from 'ws';
 import { createPhone, DEFAULT_RELAY_URL } from '../src/phone.mjs';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Never your own daemon (47615) or the live-test harness (47690).
+const TAKEN = new Set([47615, 47690, Number(process.env.AGENT_DECK_LIVE_PORT) || 0]);
+const randomPort = () => { let p; do p = 47000 + Math.floor(Math.random() * 900); while (TAKEN.has(p)); return p; };
 
 let passed = 0;
 const check = (name) => { passed++; console.log(`  ✓ ${name}`); };
@@ -20,7 +29,7 @@ const cleanups = [];
 async function fakeRelay() {
   let wss, port;
   for (;;) {
-    port = 47000 + Math.floor(Math.random() * 800);
+    port = randomPort();
     try {
       wss = new WebSocketServer({ port, host: '127.0.0.1' });
       await new Promise((res, rej) => { wss.once('listening', res); wss.once('error', rej); });
@@ -67,6 +76,325 @@ async function linked(t, relay) {
   await until(() => t.phone.view().linked, 'linked');
 }
 const pend = (o) => ({ id: 'p1', hookEvent: 'PreToolUse', toolName: 'Bash', toolInput: { command: 'ls' }, project: 'proj', questions: null, createdAt: 1_000_000, expiresAt: 1_000_000 + 90000, ...o });
+
+// ---------- a real daemon with the phone wired in ----------
+async function runCleanups() {
+  for (const c of cleanups.splice(0).reverse()) { try { await c(); } catch { /* best effort */ } }
+}
+function within(promise, ms, what) {
+  let t;
+  const late = new Promise((_, reject) => { t = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(t));
+}
+// A port free on every given address (the daemon exits quietly when its port is busy).
+async function freePort(hosts) {
+  for (;;) {
+    const port = randomPort();
+    const free = await Promise.all(hosts.map((host) => new Promise((res) => {
+      const s = net.createServer();
+      s.once('error', () => res(false));
+      s.listen(port, host, () => s.close(() => res(true)));
+    })));
+    if (free.every(Boolean)) { TAKEN.add(port); return port; }
+  }
+}
+
+// The relay as a daemon sees it: /link, refusing any key but the machine's, answering hello with a linked status.
+const RELAY_STATUS = { type: 'status', linked: true, number: '+27•••••4567', balanceMicroUsd: 1000000, billing: 'trial', botNumber: '27000000000' };
+async function linkRelay(key) {
+  const port = await freePort(['127.0.0.1']);
+  const relay = { url: `ws://127.0.0.1:${port}/link`, got: [], socks: [], connections: 0, refused: 0 };
+  const wss = new WebSocketServer({
+    port, host: '127.0.0.1', path: '/link',
+    verifyClient: (info) => {
+      const ok = info.req.headers.authorization === 'Bearer ' + key;
+      if (!ok) relay.refused++;
+      return ok;
+    },
+  });
+  await new Promise((res, rej) => { wss.once('listening', res); wss.once('error', rej); });
+  wss.on('connection', (ws) => {
+    relay.connections++;
+    relay.socks.push(ws);
+    ws.on('message', (d) => {
+      const s = d.toString();
+      if (s === 'ping') return ws.send('pong');
+      const m = JSON.parse(s);
+      relay.got.push(m);
+      if (m.type === 'hello') ws.send(JSON.stringify(RELAY_STATUS));
+    });
+  });
+  relay.send = (o) => relay.socks.at(-1).send(JSON.stringify(o));
+  relay.of = (type, id) => relay.got.filter((m) => m.type === type && (id === undefined || m.pendingId === id));
+  relay.close = () => new Promise((res) => { for (const c of wss.clients) c.terminate(); wss.close(() => res()); });
+  cleanups.push(relay.close);
+  return relay;
+}
+
+// A daemon in a throwaway AGENT_DECK_HOME, linked to `relay` through a pre-written phone.json
+// (its key is the one the relay accepts; enabled, "only when I'm away").
+const daemons = [];
+async function startDaemon({ name, key, relay, bind, token }) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ad-phone-daemon-'));
+  const port = await freePort(bind ? ['127.0.0.1', bind] : ['127.0.0.1']);
+  const claude = path.join(home, 'claude'); // a fake ~/.claude: none of this machine's real sessions
+  fs.mkdirSync(path.join(claude, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'crontab'), '');
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ port, name, otlpPort: 0, ...(bind ? { bind, token } : {}) }));
+  fs.writeFileSync(path.join(home, 'phone.json'), JSON.stringify({ key, relay: relay.url, enabled: true, mode: 'away', lastStatus: null }), { mode: 0o600 });
+  const awayFile = path.join(home, 'away.json');
+  const d = { home, port, name, logFile: path.join(home, 'daemon.log') };
+  d.away = (idleMs) => fs.writeFileSync(awayFile, JSON.stringify({ idleMs, locked: false }));
+  d.away(1000);
+  d.env = {
+    ...process.env, AGENT_DECK_HOME: home, AGENT_DECK_PORT: String(port), CLAUDE_CONFIG_DIR: claude,
+    AGENT_DECK_CRONTAB: path.join(home, 'crontab'), AGENT_DECK_RELAY: relay.url, AGENT_DECK_AWAY_FILE: awayFile,
+  };
+  for (const k of ['AGENT_DECK_DISABLE', 'AGENT_DECK_BIND', 'AGENT_DECK_VERBOSE']) delete d.env[k];
+  d.child = spawn(process.execPath, [path.join(ROOT, 'src', 'daemon.mjs')], { env: d.env, stdio: 'ignore' });
+  const exited = new Promise((r) => d.child.once('exit', r));
+  const running = () => d.child.exitCode === null && d.child.signalCode === null;
+  cleanups.push(async () => {
+    if (running()) d.child.kill('SIGTERM');
+    await Promise.race([exited, sleep(3000)]);
+    if (running()) d.child.kill('SIGKILL');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  daemons.push(d);
+  let health = null;
+  for (let i = 0; i < 50 && !health; i++) {
+    try { health = await (await fetch(`http://127.0.0.1:${port}/health`)).json(); } catch { await sleep(100); }
+  }
+  assert.equal(health?.name, name, 'the test daemon answers on its own port');
+  return d;
+}
+
+function panel(url) {
+  const ws = new WebSocket(url);
+  const p = { ws, snap: null };
+  ws.on('message', (d) => { const m = JSON.parse(String(d)); if (m.type === 'snapshot') p.snap = m; });
+  ws.on('error', () => {});
+  p.opened = new Promise((r) => ws.once('open', r));
+  p.send = (o) => ws.send(JSON.stringify(o));
+  p.close = () => new Promise((r) => {
+    if (ws.readyState === WebSocket.CLOSED) return r();
+    ws.once('close', r);
+    ws.close();
+  });
+  cleanups.push(p.close);
+  return p;
+}
+
+// From test/e2e.mjs, with the daemon's env passed in.
+const hookKids = new Set();
+function hook(env, mode, input) {
+  let child;
+  const done = new Promise((resolve) => {
+    child = spawn(process.execPath, [path.join(ROOT, 'src', 'hook.mjs'), mode], { env });
+    hookKids.add(child);
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    child.on('close', (code) => { hookKids.delete(child); resolve({ code, out }); });
+    child.stdin.end(JSON.stringify(input));
+  });
+  done.child = child; // lets a test kill a held hook the way Claude Code does
+  return done;
+}
+const ask = (d, extra) => hook(d.env, 'decide', {
+  session_id: 'phone-sess', cwd: '/work/voice-api', hook_event_name: 'PermissionRequest', permission_mode: 'default', tool_name: 'Bash', ...extra,
+});
+const decisionOf = (r) => JSON.parse(r.out).hookSpecificOutput.decision;
+
+async function daemonChecks() {
+  cleanups.push(() => { for (const k of hookKids) k.kill(); });
+  const key = crypto.randomBytes(32).toString('base64url');
+  const relay = await linkRelay(key);
+  const d = await startDaemon({ name: 'phone-box', key, relay });
+  const url = `ws://127.0.0.1:${d.port}/ws`;
+
+  // Wait for the link through a local panel, then close it: the first checks run with no panel.
+  const w = panel(url);
+  await w.opened;
+  w.send({ type: 'hello', approvals: false });
+  await until(() => w.snap?.phone?.linked && w.snap.phone.connected && w.snap.phone.enabled, 'the daemon linked to the fake relay', 8000);
+  assert.equal(relay.of('hello').length, 1);
+  assert.equal(relay.refused, 0);
+  assert.equal(typeof w.snap.localActive, 'boolean');
+  await w.close();
+
+  // no panel, away
+  d.away(400000);
+  const secret = 'fake_token_0123456789abcdefXYZ';
+  const h1 = ask(d, { tool_input: { command: `curl -H "Authorization: Bearer ${secret}" https://api.example.com/v1/charges` } });
+  await until(() => relay.of('prompt').length === 1, 'a prompt on the relay', 8000);
+  const m1 = relay.of('prompt')[0];
+  assert.equal(m1.prompt.kind, 'approval');
+  assert.equal(m1.prompt.project, 'voice-api');
+  assert.match(m1.prompt.detail, /^curl -H "Authorization: Bearer ••••" https:\/\/api\.example\.com/);
+  assert.ok(!JSON.stringify(m1).includes(secret), 'the secret never reaches the relay');
+  relay.send({ type: 'decide', pendingId: m1.pendingId, decision: { behavior: 'allow' } });
+  const r1 = await within(h1, 5000, 'the hook answered from the phone');
+  assert.equal(decisionOf(r1).behavior, 'allow');
+  await until(() => relay.of('decide-ack', m1.pendingId).length === 1, 'decide-ack');
+  assert.equal(relay.of('decide-ack', m1.pendingId)[0].ok, true);
+  check('no panel, away: held, prompt with masked detail on the relay, the relay\'s allow answers the hook');
+
+  // no panel, at desk
+  d.away(1000);
+  let sentSoFar = relay.of('prompt').length;
+  const t2 = Date.now();
+  const r2 = await within(ask(d, { tool_input: { command: 'ls -la' } }), 5000, 'the at-desk hook');
+  assert.equal(r2.out, '');
+  assert.ok(Date.now() - t2 < 1500, 'returned at once');
+  await sleep(2500); // a tick: nothing goes to the relay later either
+  assert.equal(relay.of('prompt').length, sentSoFar);
+  check('no panel, at desk: the hook returns at once with no output, the relay gets nothing');
+
+  // always is ignored
+  d.away(400000);
+  const h3 = ask(d, {
+    tool_input: { command: 'rm -rf build' },
+    permission_suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'rm -rf build' }], behavior: 'allow', destination: 'localSettings' }],
+  });
+  await until(() => relay.of('prompt').length === sentSoFar + 1, 'the second prompt', 8000);
+  const m3 = relay.of('prompt').at(-1);
+  // The wrong shape for this prompt (answers to a permission) is refused, and it stays held.
+  relay.send({ type: 'decide', pendingId: m3.pendingId, decision: { answers: { 'Which?': 'yes' } } });
+  await until(() => relay.of('decide-ack', m3.pendingId).length === 1, 'decide-ack for the wrong kind');
+  assert.deepEqual(relay.of('decide-ack', m3.pendingId)[0], { type: 'decide-ack', pendingId: m3.pendingId, ok: false, reason: 'bad-decision' });
+  relay.send({ type: 'decide', pendingId: m3.pendingId, decision: { behavior: 'allow', always: true } });
+  const d3 = decisionOf(await within(h3, 5000, 'the hook answered with always'));
+  assert.equal(d3.behavior, 'allow');
+  assert.ok(!('updatedPermissions' in d3), 'no permission rule from the phone');
+  check('always is ignored: allow with always:true from the relay adds no updatedPermissions');
+
+  // A question answered from the phone; allow/deny alone is refused for a question.
+  const questions = [{ question: 'Which audio format?', header: 'Format', multiSelect: false, options: [{ label: 'Opus', description: 'small' }, { label: 'WAV', description: 'raw' }] }];
+  const hq = ask(d, { tool_name: 'AskUserQuestion', tool_input: { questions } });
+  await until(() => relay.of('prompt').at(-1)?.prompt?.kind === 'question', 'the question on the relay', 8000);
+  const mq = relay.of('prompt').at(-1);
+  assert.deepEqual(mq.prompt.questions, [{ question: 'Which audio format?', header: 'Format', multiSelect: false, options: ['Opus', 'WAV'] }]);
+  relay.send({ type: 'decide', pendingId: mq.pendingId, decision: { behavior: 'allow' } });
+  await until(() => relay.of('decide-ack', mq.pendingId).length === 1, 'decide-ack for allow on a question');
+  assert.equal(relay.of('decide-ack', mq.pendingId)[0].reason, 'bad-decision');
+  relay.send({ type: 'decide', pendingId: mq.pendingId, decision: { answers: { 'Which audio format?': 'Opus' } } });
+  const dq = decisionOf(await within(hq, 5000, 'the question answered from the phone'));
+  assert.equal(dq.behavior, 'allow');
+  assert.deepEqual(dq.updatedInput, { questions, answers: { 'Which audio format?': 'Opus' } });
+  check('decisions are checked against the prompt: answers only for questions, allow/deny only for permissions');
+
+  // prompt-closed tells the relay how each prompt ended
+  assert.deepEqual(relay.of('prompt-closed', m1.pendingId).map((x) => x.why), ['answered']);
+  sentSoFar = relay.of('prompt').length;
+  const h4 = ask(d, { tool_input: { command: 'make deploy' } });
+  await until(() => relay.of('prompt').length === sentSoFar + 1, 'the third prompt', 8000);
+  const m4 = relay.of('prompt').at(-1);
+  h4.child.kill(); // Claude Code drops the hook
+  await until(() => relay.of('prompt-closed', m4.pendingId).length === 1, 'prompt-closed after the hook closed');
+  assert.equal(relay.of('prompt-closed', m4.pendingId)[0].why, 'gone');
+  check('prompt-closed: answered on the phone -> answered, hook closed -> gone');
+
+  // hold extended
+  const w2 = panel(url);
+  await w2.opened;
+  w2.send({ type: 'hello', approvals: false });
+  await until(() => w2.snap?.phone?.linked, 'the panel sees the link');
+  sentSoFar = relay.of('prompt').length;
+  const h5 = ask(d, { tool_input: { command: 'npm publish' } });
+  await until(() => relay.of('prompt').length === sentSoFar + 1, 'the fourth prompt', 8000);
+  const m5 = relay.of('prompt').at(-1);
+  const pend5 = () => w2.snap?.sessions?.find((s) => s.pending?.id === m5.pendingId)?.pending;
+  assert.equal(pend5()?.phone, undefined, 'not marked sent before the relay says so');
+  relay.send({ type: 'prompt-sent', pendingId: m5.pendingId });
+  await until(() => pend5()?.phone === 'sent' && Math.abs(pend5().expiresAt - (pend5().createdAt + 570000)) < 1000, 'the hold extended and marked sent');
+  assert.equal(m5.expiresAt, pend5().createdAt + 570000);
+  assert.equal(w2.snap.localActive, false);
+  assert.equal(w2.snap.phone.sent[m5.pendingId], 'sent');
+  check('hold extended: after prompt-sent the local snapshot\'s pending expiresAt = createdAt + 570 s, marked sent');
+
+  // A panel closing while the phone can still answer doesn't hand the prompt back (the answer below proves it).
+  const w3 = panel(url);
+  await w3.opened;
+  await w3.close();
+  await sleep(200);
+
+  // a decision delivered after a reconnect still answers
+  const hellos = relay.of('hello').length;
+  relay.socks.at(-1).terminate();
+  await until(() => relay.of('hello').length === hellos + 1, 'hello after the reconnect', 8000);
+  assert.ok(pend5(), 'the PermissionRequest stays held while the relay link is down');
+  relay.send({ type: 'decide', pendingId: m5.pendingId, decision: { behavior: 'deny', message: 'Not from the train' } });
+  const d5 = decisionOf(await within(h5, 5000, 'the hook answered after the reconnect'));
+  assert.deepEqual(d5, { behavior: 'deny', message: 'Not from the train' });
+  check('a decision delivered after a reconnect still answers');
+  check('a panel closing doesn\'t release a prompt the phone can answer');
+
+  // presence
+  const p2 = panel(url);
+  await p2.opened;
+  p2.send({ type: 'hello', approvals: false });
+  await until(() => w2.snap?.localActive === false && w2.snap.phone.connected && w2.snap.phone.linked && w2.snap.phone.enabled, 'away, phone ready');
+  p2.send({ type: 'presence', active: true });
+  await sleep(200);
+  const t6 = Date.now();
+  const r6 = await within(ask(d, { tool_input: { command: 'git push' } }), 5000, 'the hook while another machine is in use');
+  assert.equal(r6.out, '');
+  assert.ok(Date.now() - t6 < 1500, 'returned at once');
+  p2.send({ type: 'presence', active: false });
+  await sleep(200);
+  const h7 = ask(d, { tool_input: { command: 'git push --force' } });
+  await until(() => w2.snap?.sessions?.some((s) => s.pending?.detail === 'git push --force'), 'held again once presence is inactive');
+  w2.send({ type: 'release', pendingId: w2.snap.sessions.find((s) => s.pending?.detail === 'git push --force').pending.id });
+  assert.equal((await within(h7, 5000, 'the released hook')).out, '');
+  check('presence: another panel reporting active means not away, so the hook isn\'t held');
+
+  // Back at the desk with no panel approving: a PreToolUse question held for the phone goes back
+  // to the terminal on the next tick (the terminal doesn't show it while it's held).
+  d.away(400000);
+  const deskQ = [{ question: 'Deploy to which stage?', header: 'Stage', multiSelect: false, options: [{ label: 'dev' }, { label: 'prod' }] }];
+  const h8 = ask(d, { hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', permission_mode: 'bypassPermissions', tool_use_id: 'q-desk', tool_input: { questions: deskQ } });
+  await until(() => relay.of('prompt').at(-1)?.prompt?.questions?.[0]?.question === 'Deploy to which stage?', 'the PreToolUse question on the relay', 8000);
+  const m8 = relay.of('prompt').at(-1);
+  d.away(1000);
+  assert.equal((await within(h8, 6000, 'the question handed back to the terminal')).out, '');
+  await until(() => relay.of('prompt-closed', m8.pendingId).length === 1, 'prompt-closed for the released question');
+  assert.equal(relay.of('prompt-closed', m8.pendingId)[0].why, 'timeout');
+  check('back at the desk: a PreToolUse question held for the phone is handed to the terminal within a tick');
+
+  const log = fs.readFileSync(d.logFile, 'utf8');
+  for (const text of [secret, 'curl', 'npm publish', 'git push', '+27']) assert.ok(!log.includes(text), `daemon log has ${text}`);
+  check('daemon log carries no prompt text or number');
+
+  // local only
+  const lan = Object.values(os.networkInterfaces()).flat().find((a) => a && a.family === 'IPv4' && !a.internal)?.address;
+  if (!lan) {
+    console.log('  - skipped "local only": no LAN address on this machine');
+  } else {
+    const key2 = crypto.randomBytes(32).toString('base64url');
+    const relay2 = await linkRelay(key2);
+    const TOKEN = 'y'.repeat(32);
+    const d2 = await startDaemon({ name: 'phone-lan', key: key2, relay: relay2, bind: lan, token: TOKEN });
+    const local = panel(`ws://127.0.0.1:${d2.port}/ws`);
+    const remote = panel(`ws://${lan}:${d2.port}/ws?token=${TOKEN}`);
+    await Promise.all([local.opened, remote.opened]);
+    local.send({ type: 'hello', approvals: false });
+    remote.send({ type: 'hello', approvals: false });
+    await until(() => local.snap?.phone?.linked && local.snap.phone.connected, 'the LAN daemon linked', 8000);
+    await until(() => remote.snap, 'a snapshot on the remote panel');
+    assert.ok(!('phone' in remote.snap) && !('localActive' in remote.snap), 'phone state only goes to this machine\'s panels');
+    remote.send({ type: 'phone-link', number: '+27820000000' });
+    remote.send({ type: 'phone-settings', mode: 'everything', enabled: false });
+    remote.send({ type: 'phone-unlink' });
+    await sleep(500);
+    assert.equal(relay2.of('link-start').length, 0, 'a remote panel can\'t start a link');
+    assert.equal(relay2.of('unlink').length, 0, 'or unlink');
+    assert.equal(local.snap.phone.mode, 'away', 'or change settings');
+    assert.equal(local.snap.phone.enabled, true);
+    local.send({ type: 'phone-link', number: '+27820000000' });
+    await until(() => relay2.of('link-start').length === 1, 'link-start from the local panel');
+    check('local only: phone-* from a remote panel are ignored; the local panel\'s phone-link reaches the relay');
+  }
+}
 
 async function main() {
   assert.equal(DEFAULT_RELAY_URL, '');
@@ -462,7 +790,16 @@ async function main() {
     check('stop: closes and does not reconnect');
   }
 
-  for (const c of cleanups.reverse()) await c();
+  await daemonChecks();
+
+  await runCleanups();
   console.log(`${passed} checks passed`);
 }
-main().then(() => process.exit(0), (e) => { console.error(e); process.exit(1); });
+main().then(() => process.exit(0), async (e) => {
+  console.error(e);
+  for (const d of daemons) {
+    try { console.error(`--- ${d.name} daemon.log (end)\n` + fs.readFileSync(d.logFile, 'utf8').slice(-3000)); } catch { /* no log */ }
+  }
+  await runCleanups(); // held hooks and test daemons must not outlive a failed run
+  process.exit(1);
+});

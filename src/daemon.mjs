@@ -23,6 +23,8 @@ import {
   otlpServiceName, newOtlpAgent, applyOtlpSpans, applyOtlpMetrics, applyOtlpLogs, otlpTick, wakeClock,
 } from './agents.mjs';
 import { decodeOtlp } from './otlp.mjs';
+import { createPhone } from './phone.mjs';
+import { localAway } from './away.mjs';
 import zlib from 'node:zlib';
 
 const VERSION = '0.1.0';
@@ -64,12 +66,41 @@ if (!isLoopback(BIND) && !cfg.token) {
 const sessions = new Map();
 /** service agents (see agents.mjs), key -> state */
 const agents = new Map();
-/** pending id -> { key, resolve, timer, hookEvent, toolInput, suggestions, kind } */
+/** pending id -> { key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind, agentId, createdAt, expiresAt, view } */
 const pendings = new Map();
 /** question fingerprint -> time it was handed back to the terminal */
 const releasedQuestions = new Map();
 /** @type {Set<import('ws').WebSocket>} */
 const widgets = new Set();
+
+// ---------- the phone (WhatsApp through the relay, see phone.mjs) ----------
+// The relay link counts as an approver while it's linked, enabled and connected, and either the
+// mode is "everything" or this machine is away. With no relay configured it never connects.
+const phone = createPhone({
+  home: HOME, machineName: NAME, log, onChange: broadcast, decide: phoneDecide, extendHold,
+  relayUrl: process.env.AGENT_DECK_RELAY, version: VERSION,
+});
+const PHONE_HOLD_MS = 570000; // a PermissionRequest sent to the phone is held to createdAt + this
+const PRESENCE_MS = 60000; // a panel's presence report counts for this long
+// The last localAway() result: refreshed every tick and when a hook decides whether to hold.
+let localNow = { away: false, known: false, idleMs: null, locked: null };
+async function refreshAway() {
+  const r = await localAway();
+  const flipped = r.away !== localNow.away;
+  localNow = r;
+  if (flipped) broadcast(); // localActive in local snapshots
+  return r;
+}
+// Away from this machine, and no panel says its own machine is in use (presence, last 60 s).
+const machineAway = (now = Date.now()) => localNow.away
+  && ![...widgets].some((w) => w.presence?.active === true && now - w.presence.at < PRESENCE_MS);
+// "Can the phone answer this prompt?" Only probes away (gdbus/ioreg) when the answer depends on it.
+async function phoneAnswers() {
+  if (!phone.isApprover(true)) return false; // not linked, enabled and connected
+  if (phone.isApprover(false)) return true; // "send everything"
+  await refreshAway();
+  return phone.isApprover(machineAway());
+}
 
 const pidAlive = (pid) => {
   if (!pid) return true;
@@ -174,8 +205,8 @@ function sendActivity(now = Date.now()) {
 
 // ---------- broadcasting ----------
 let broadcastTimer = null;
-// Pairing requests and the device list go only to panels on this machine (local), never to
-// another machine's panel.
+// Pairing requests, the device list and the phone go only to panels on this machine (local),
+// never to another machine's panel.
 function snapshot(local = false) {
   checkWake();
   const s = {
@@ -186,6 +217,10 @@ function snapshot(local = false) {
   if (local) {
     s.pairRequests = [...pairRequests.values()].map((r) => ({ id: r.id, name: r.device.name, dns: r.device.dns, login: r.device.login, ip: r.ip, port: r.port, shared: r.shared, at: r.at }));
     s.devices = [...devices.values()].map((d) => ({ ...d, connected: [...widgets].some((w) => w.deviceId === d.id) }));
+    s.phone = phone.view();
+    s.localActive = !localNow.away;
+    // 'sent' or 'failed:<reason>' on the card. publicView returns a copy of the pending view.
+    for (const v of s.sessions) if (v.pending && Object.hasOwn(s.phone.sent, v.pending.id)) v.pending.phone = s.phone.sent[v.pending.id];
   }
   return s;
 }
@@ -287,11 +322,13 @@ function hold(s, res, { kind, hookEvent, toolName, toolInput, suggestions, agent
       }
       if (!output && !settled && kind === 'question' && hookEvent === 'PreToolUse') releasedQuestions.set(questionFingerprint(s.key, toolInput?.questions), Date.now());
       log(`pending ${id} (${kind}) finished: ${why}`);
+      // Tell the relay, if it's on the phone: answered (panel, phone or terminal), gone, or timed out.
+      try { phone.closed(id, why.startsWith('answered') ? 'answered' : why === 'hook closed' ? 'gone' : 'timeout'); } catch { log('phone: closed failed'); }
       broadcast();
       resolve(output);
     };
     const timer = setTimeout(() => finish(null, 'timeout'), holdMs);
-    pendings.set(id, { key: s.key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind, agentId: agentId || null, createdAt: now });
+    pendings.set(id, { key: s.key, finish, timer, hookEvent, toolName, toolInput, suggestions, kind, agentId: agentId || null, createdAt: now, expiresAt: now + holdMs, view });
     // If Claude Code gives up on the hook (or the session dies), drop the pending card.
     res.on('close', () => { if (pendings.has(id)) finish(null, 'hook closed'); });
     log(`holding ${kind} ${id} for ${s.key} (${toolName})`);
@@ -462,6 +499,40 @@ function buildOutput(p, decision) {
   return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: d } };
 }
 
+// The relay confirmed a PermissionRequest is on the phone: hold it as long as Claude Code allows.
+// The terminal shows that prompt meanwhile, so a longer hold blocks nobody. Never PreToolUse.
+function extendHold(id) {
+  const p = pendings.get(id);
+  if (!p || p.hookEvent !== 'PermissionRequest') return;
+  const until = p.createdAt + PHONE_HOLD_MS;
+  clearTimeout(p.timer);
+  p.timer = setTimeout(() => p.finish(null, 'timeout'), Math.max(0, until - Date.now()));
+  p.expiresAt = p.view.expiresAt = until;
+  log(`pending ${id} held longer: it's on the phone`);
+  broadcast();
+}
+
+// A decision from the phone (phone.mjs only passes ones for prompts it sent). Checked again here
+// against the prompt's kind, rebuilt from the allowed fields only, never with "always".
+const plainObject = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+function phoneDecide(id, decision) {
+  const p = pendings.get(id);
+  if (!p) return { ok: false, reason: 'gone' };
+  let clean = null;
+  if (p.kind === 'question') {
+    const a = decision?.answers;
+    if (plainObject(a) && Object.values(a).every((v) => typeof v === 'string')) clean = { answers: { ...a } };
+  } else if (decision?.behavior === 'allow') {
+    clean = { behavior: 'allow' };
+  } else if (decision?.behavior === 'deny') {
+    clean = typeof decision.message === 'string' ? { behavior: 'deny', message: decision.message } : { behavior: 'deny' };
+  }
+  if (!clean) return { ok: false, reason: 'bad-decision' };
+  p.finish(buildOutput(p, clean), 'answered on phone');
+  return { ok: true };
+}
+
 async function handleHook(body, res) {
   const { event, input = {}, meta = {}, mode } = body;
   if (EVENT_LOG) fs.appendFile(EVENT_LOG, JSON.stringify(body) + '\n', () => {});
@@ -480,13 +551,17 @@ async function handleHook(body, res) {
       broadcast();
       return null;
     }
-    let skip = !approversConnected();
+    let skip = event === 'PreToolUse' && !isQuestion; // only questions are handled on PreToolUse
     if (isQuestion && event === 'PreToolUse') {
       const fp = questionFingerprint(s.key, input.tool_input?.questions);
       const released = releasedQuestions.get(fp);
       if (released && Date.now() - released < 120000) skip = true; // already handed to the terminal
     }
-    if (event === 'PreToolUse' && !isQuestion) skip = true; // only questions are handled on PreToolUse
+    // Someone has to be able to answer: a panel with approvals on, or the phone (while away).
+    if (!skip && !approversConnected()) {
+      skip = !(await phoneAnswers());
+      if (!skip && res.destroyed) { broadcast(); return null; } // Claude Code dropped the hook meanwhile
+    }
     if (!skip) {
       output = await hold(s, res, {
         kind: isQuestion ? 'question' : 'approval',
@@ -654,6 +729,16 @@ function handleWidgetMessage(ws, msg) {
     case 'approvals':
       ws.approvals = Boolean(msg.enabled);
       break;
+    case 'presence': // "the machine this panel runs on is in use": then this one isn't away
+      ws.presence = { active: Boolean(msg.active), at: Date.now() };
+      break;
+    // The phone link and its settings: only a panel on this machine.
+    case 'phone-link':
+    case 'phone-unlink':
+    case 'phone-cancel-link':
+    case 'phone-settings':
+      if (ws.local) phone.panelMessage(msg);
+      break;
     case 'decide': {
       const p = pendings.get(msg.pendingId);
       if (p) p.finish(buildOutput(p, msg.decision || {}), 'answered in widget');
@@ -737,7 +822,32 @@ setInterval(() => {
   }
   if (changed) broadcast();
   sendActivity(now);
+  phoneTick().catch(() => log('phone tick failed'));
 }, TICK_MS).unref();
+
+// Every tick: refresh away, offer held prompts to the phone, and when nobody can answer any more
+// (no panel approving, and the phone doesn't count: back at the desk, or the link dropped), hand
+// PreToolUse questions back to the terminal, which doesn't show them while they're held.
+// PermissionRequest holds stay: the terminal shows them anyway, and one may be on the phone.
+let phoneTickBusy = false;
+async function phoneTick() {
+  if (phoneTickBusy) return; // a slow away probe: skip this tick
+  phoneTickBusy = true;
+  try {
+    await refreshAway();
+    const away = machineAway();
+    phone.consider([...pendings].map(([id, p]) => ({
+      id, hookEvent: p.hookEvent, toolName: p.toolName, toolInput: p.toolInput,
+      project: sessions.get(p.key)?.project || '', questions: p.view.questions || null,
+      createdAt: p.createdAt, expiresAt: p.expiresAt,
+    })), away);
+    if (!approversConnected() && !phone.isApprover(away)) {
+      for (const p of [...pendings.values()]) if (p.hookEvent === 'PreToolUse') p.finish(null, 'no approvers');
+    }
+  } finally {
+    phoneTickBusy = false;
+  }
+}
 
 // ---------- server ----------
 // A web page in a browser on this machine can reach 127.0.0.1 too. Our own clients (hook.mjs,
@@ -876,8 +986,9 @@ async function handleUpgrade(req, socket, head) {
     ws.on('close', () => {
       widgets.delete(ws);
       log(`widget disconnected (${widgets.size} left)`);
-      // Nobody left to answer: hand pending prompts back to the terminal right away.
-      if (!approversConnected()) for (const p of [...pendings.values()]) p.finish(null, 'no widgets');
+      // Nobody left to answer (no panel, and the phone doesn't count): hand pending prompts back
+      // to the terminal right away.
+      if (!approversConnected() && !phone.isApprover(machineAway())) for (const p of [...pendings.values()]) p.finish(null, 'no widgets');
       if (ws.deviceId) broadcast(); // "connected" in the local panel's device list
     });
     ws.send(JSON.stringify(snapshot(ws.local)));
@@ -900,6 +1011,7 @@ fs.watchFile(CONFIG_PATH, { interval: 2000 }, () => {
 }).unref();
 
 loadState();
+phone.start();
 startOtlp();
 let listening = 0;
 servers.forEach((srv, i) => {
@@ -919,5 +1031,6 @@ servers.forEach((srv, i) => {
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
   for (const p of [...pendings.values()]) p.finish(null, 'shutdown');
   try { if (fs.readFileSync(PID_PATH, 'utf8') === String(process.pid)) fs.unlinkSync(PID_PATH); } catch {}
-  setTimeout(() => process.exit(0), 100);
+  // The phone link closes last, so the prompt-closed messages just queued can still go out.
+  setTimeout(() => { phone.stop(); process.exit(0); }, 100);
 });
