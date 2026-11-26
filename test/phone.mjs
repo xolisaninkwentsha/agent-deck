@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { WebSocketServer } from 'ws';
 import { createPhone, DEFAULT_RELAY_URL } from '../src/phone.mjs';
 
@@ -58,7 +59,7 @@ function setup(relay, over = {}) {
   Object.assign(t, { phone, home });
   return t;
 }
-const LINKED = { type: 'status', linked: true, number: '+27821234567', balanceMicroUsd: 5000, billing: 'trial', botNumber: '27600000000' };
+const LINKED = { type: 'status', linked: true, number: '+27•••••4567', balanceMicroUsd: 5000, billing: 'trial', botNumber: '27600000000' };
 async function linked(t, relay) {
   t.phone.start();
   await until(() => t.phone.view().connected, 'connect');
@@ -116,9 +117,9 @@ async function main() {
     const t = setup(relay);
     t.phone.start();
     await until(() => t.phone.view().connected, 'connect');
-    t.phone.panelMessage({ type: 'phone-link', number: '  +27821234567 ' });
+    t.phone.panelMessage({ type: 'phone-link', number: '  +27•••••4567 ' });
     await until(() => relay.of('link-start').length === 1, 'link-start');
-    assert.equal(relay.of('link-start')[0].number, '+27821234567');
+    assert.equal(relay.of('link-start')[0].number, '+27•••••4567');
     relay.send({ type: 'link-code', code: 'ABCD2345', expiresAt: 123, botNumber: '27600000000' });
     await until(() => t.phone.view().code, 'code');
     assert.deepEqual(t.phone.view().code, { code: 'ABCD2345', expiresAt: 123, botNumber: '27600000000' });
@@ -127,7 +128,7 @@ async function main() {
     const v = t.phone.view();
     assert.equal(v.code, null);
     assert.equal(v.enabled, true);
-    assert.equal(v.number, '+27821234567');
+    assert.equal(v.number, '+27•••••4567');
     assert.equal(v.balanceMicroUsd, 5000);
     assert.equal(v.billing, 'trial');
     assert.deepEqual(Object.keys(v).sort(), ['balanceMicroUsd', 'billing', 'botNumber', 'code', 'connected', 'enabled', 'error', 'linked', 'mode', 'number', 'relay', 'sent'].sort());
@@ -157,7 +158,7 @@ async function main() {
   {
     const relay = await fakeRelay();
     const t = setup(relay);
-    t.phone.panelMessage({ type: 'phone-link', number: '+27821234567' });
+    t.phone.panelMessage({ type: 'phone-link', number: '+27•••••4567' });
     assert.equal(t.phone.view().error, 'relay-unreachable');
     check('link: not connected gives relay-unreachable');
   }
@@ -261,13 +262,151 @@ async function main() {
   {
     const relay = await fakeRelay();
     const t = setup(relay);
-    await linked(t, relay);
+    const acks = () => relay.of('decide-ack');
+    t.phone.start();
+    await until(() => t.phone.view().connected, 'connect');
+    // unlinked: refused
     relay.send({ type: 'decide', pendingId: 'p9', decision: { behavior: 'allow' } });
-    await until(() => relay.of('decide-ack').length === 1, 'ack');
+    await until(() => acks().length === 1, 'ack unlinked');
+    assert.deepEqual(acks()[0], { type: 'decide-ack', pendingId: 'p9', ok: false, reason: 'unknown' });
+    relay.send(LINKED);
+    await until(() => t.phone.view().linked, 'linked');
+    // never sent: refused
+    relay.send({ type: 'decide', pendingId: 'nope', decision: { behavior: 'allow' } });
+    await until(() => acks().length === 2, 'ack unknown');
+    assert.equal(acks()[1].reason, 'unknown');
+    assert.deepEqual(t.decided, []);
+    check('decide: unknown pendingId or unlinked -> ok:false unknown, callback not called');
+
+    t.phone.consider([pend({ id: 'p9' }), pend({ id: 'p8' }), pend({ id: 'p7' }), pend({ id: 'p6' })], true);
+    await until(() => relay.of('prompt').length === 4, 'prompts');
+    // in flight counts as known
+    relay.send({ type: 'decide', pendingId: 'p9', decision: { behavior: 'allow', always: true, extra: 1 } });
+    await until(() => acks().length === 3, 'ack ok');
     assert.deepEqual(t.decided, [['p9', { behavior: 'allow' }]]);
-    assert.equal(relay.of('decide-ack')[0].pendingId, 'p9');
-    assert.equal(relay.of('decide-ack')[0].ok, true);
-    check('decide: relay decide calls decide(), decide-ack sent back');
+    assert.deepEqual(acks()[2], { type: 'decide-ack', pendingId: 'p9', ok: true });
+    check('decide: callback gets {behavior:allow} only, never always; ack ok');
+
+    relay.send({ type: 'decide', pendingId: 'p8', decision: { behavior: 'maybe' } });
+    await until(() => acks().length === 4, 'ack bad');
+    assert.equal(acks()[3].reason, 'bad-decision');
+    relay.send({ type: 'decide', pendingId: 'p8', decision: { behavior: 'deny', message: 'x'.repeat(201) } });
+    relay.send({ type: 'decide', pendingId: 'p8', decision: { answers: { q: 1 } } });
+    relay.send({ type: 'decide', pendingId: 'p8', decision: null });
+    await until(() => acks().length === 7, 'acks bad');
+    assert.ok(acks().slice(3).every((a) => !a.ok && a.reason === 'bad-decision'));
+    assert.equal(t.decided.length, 1);
+    relay.send({ type: 'decide', pendingId: 'p8', decision: { behavior: 'deny', message: 'no' } });
+    relay.send({ type: 'decide', pendingId: 'p7', decision: { answers: { q: 'a' }, always: true } });
+    await until(() => t.decided.length === 3, 'valid shapes');
+    assert.deepEqual(t.decided[1], ['p8', { behavior: 'deny', message: 'no' }]);
+    assert.deepEqual(t.decided[2], ['p7', { answers: { q: 'a' } }]);
+    check('decide: bad shapes -> bad-decision; deny and answers pass with only allowed fields');
+
+    t.phone.panelMessage({ type: 'phone-settings', enabled: false });
+    relay.send({ type: 'decide', pendingId: 'p6', decision: { behavior: 'allow' } });
+    await until(() => acks().length === 10, 'ack disabled');
+    assert.equal(acks().at(-1).reason, 'unknown');
+    assert.equal(t.decided.length, 3);
+    check('decide: disabled -> unknown, callback not called');
+  }
+
+  // throwing callbacks and failed writes do not crash
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay, {
+      decide: () => { throw new Error('boom'); },
+      extendHold: () => { throw new Error('boom'); },
+    });
+    await linked(t, relay);
+    t.phone.panelMessage({ type: 'phone-settings', enabled: true });
+    t.phone.consider([pend({ id: 'z1', hookEvent: 'PermissionRequest', expiresAt: 1_000_000 + 300000 })], true);
+    await until(() => relay.of('prompt').length === 1, 'prompt');
+    relay.send({ type: 'prompt-sent', pendingId: 'z1' });
+    await until(() => t.logs.some((l) => l.includes('extendHold failed')), 'extendHold failure logged');
+    assert.equal(t.phone.view().sent.z1, 'sent');
+    relay.send({ type: 'decide', pendingId: 'z1', decision: { behavior: 'allow' } });
+    await until(() => relay.of('decide-ack').length === 1, 'ack');
+    assert.equal(relay.of('decide-ack')[0].ok, false);
+    check('throwing extendHold/decide are logged and do not crash');
+  }
+  {
+    const relay = await fakeRelay();
+    let boom = false;
+    const t = setup(relay, { onChange: () => { if (boom) throw new Error('boom'); } });
+    t.phone.start();
+    await until(() => t.phone.view().connected, 'connect');
+    boom = true;
+    relay.send(LINKED);
+    await until(() => t.phone.view().linked, 'linked despite throwing onChange');
+    assert.ok(t.logs.some((l) => l.includes('onChange failed')));
+    // a failed write is logged, not thrown, and leaves no tmp file
+    fs.rmSync(t.home, { recursive: true, force: true });
+    fs.writeFileSync(t.home, 'not a directory');
+    t.phone.panelMessage({ type: 'phone-settings', mode: 'everything' });
+    assert.ok(t.logs.some((l) => l.includes('could not save')));
+    fs.rmSync(t.home, { force: true });
+    check('throwing onChange and failed save are logged and do not crash');
+  }
+
+  // handshake that never completes
+  {
+    let conns = 0;
+    const socks = [];
+    const srv = net.createServer((sock) => { conns++; socks.push(sock); sock.on('error', () => {}); });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    cleanups.push(() => new Promise((r) => { for (const x of socks) x.destroy(); srv.close(r); }));
+    const t = setup({ url: `ws://127.0.0.1:${srv.address().port}` }, { handshakeTimeout: 200 });
+    t.phone.start();
+    await until(() => conns >= 2, 'retry after handshake timeout', 6000);
+    assert.equal(t.phone.view().connected, false);
+    check('handshake: a server that never upgrades times out and the client retries');
+  }
+
+  // relay url rules
+  {
+    const relay = await fakeRelay();
+    const t = setup(relay);
+    t.phone.start();
+    await until(() => t.phone.view().connected, 'connect');
+    for (const bad of ['ws://example.com/link', 'http://x', 'wss://', 'garbage']) {
+      t.phone.panelMessage({ type: 'phone-settings', relay: bad });
+      assert.equal(t.phone.view().relay, relay.url, bad);
+      assert.equal(t.phone.view().error, 'bad-relay');
+    }
+    t.phone.panelMessage({ type: 'phone-settings', relay: ` ${relay.url}/link ` });
+    assert.equal(t.phone.view().relay, `${relay.url}/link`);
+    assert.equal(t.phone.view().error, '');
+    await until(() => relay.connections === 2, 'reconnect with loopback ws');
+    t.phone.panelMessage({ type: 'phone-settings', relay: 'wss://relay.example.com/link' });
+    assert.equal(t.phone.view().relay, 'wss://relay.example.com/link');
+    t.phone.stop();
+    const bad = setup(relay, { relayUrl: 'ws://example.com/x' });
+    bad.phone.start();
+    await sleep(50);
+    assert.equal(bad.phone.view().relay, '');
+    assert.equal(bad.phone.view().error, 'bad-relay');
+    assert.equal(bad.phone.view().connected, false);
+    check('relay url: wss and loopback ws accepted; ws to other hosts, junk rejected with bad-relay');
+  }
+
+  // relay change rotates the key
+  {
+    const relay = await fakeRelay();
+    const relay2 = await fakeRelay();
+    const t = setup(relay);
+    await linked(t, relay);
+    assert.equal(t.phone.view().enabled, true);
+    await until(() => relay.auths.length === 1, 'auth');
+    t.phone.panelMessage({ type: 'phone-settings', relay: relay2.url });
+    await until(() => relay2.connections === 1, 'second relay');
+    assert.notEqual(relay2.auths[0], relay.auths[0]);
+    const v = t.phone.view();
+    assert.equal(v.linked, false); assert.equal(v.enabled, false); assert.equal(v.number, null);
+    const st = JSON.parse(fs.readFileSync(path.join(t.home, 'phone.json'), 'utf8'));
+    assert.equal(relay2.auths[0], 'Bearer ' + st.key);
+    assert.equal(st.lastStatus, null);
+    check('relay change: new key, unlinked, disabled');
   }
 
   // isApprover

@@ -18,11 +18,43 @@ const AWAY_AFTER_MS = 120000; // a PermissionRequest unanswered this long counts
 const PERMISSION_HOLD_MS = 570000; // a PermissionRequest hold extends to createdAt + this
 
 const MODES = new Set(['away', 'everything']);
-const validRelay = (r) => typeof r === 'string' && (r === '' || r.startsWith('ws://') || r.startsWith('wss://'));
+const LOOPBACK = new Set(['127.0.0.1', '[::1]', 'localhost']);
+/** Trimmed relay URL if acceptable (wss://, or ws:// to loopback only), else null. '' passes as "none". */
+function cleanRelay(r) {
+  if (typeof r !== 'string') return null;
+  const t = r.trim();
+  if (t === '') return '';
+  let u;
+  try { u = new URL(t); } catch { return null; }
+  if (!u.hostname) return null;
+  if (u.protocol === 'wss:') return t;
+  if (u.protocol === 'ws:' && LOOPBACK.has(u.hostname)) return t;
+  return null;
+}
+
+/** Only the shapes the phone may produce; never `always` or anything extra. */
+function cleanDecision(d) {
+  if (!d || typeof d !== 'object' || Array.isArray(d)) return null;
+  if (d.answers !== undefined) {
+    const a = d.answers;
+    if (!a || typeof a !== 'object' || Array.isArray(a)) return null;
+    const entries = Object.entries(a);
+    if (entries.length > 20 || !entries.every(([, v]) => typeof v === 'string')) return null;
+    return { answers: Object.fromEntries(entries) };
+  }
+  if (d.behavior === 'allow') return { behavior: 'allow' };
+  if (d.behavior === 'deny') {
+    if (d.message === undefined) return { behavior: 'deny' };
+    if (typeof d.message !== 'string' || d.message.length > 200) return null;
+    return { behavior: 'deny', message: d.message };
+  }
+  return null;
+}
 
 export function createPhone({
   home, machineName, log = () => {}, onChange = () => {}, decide, extendHold,
   relayUrl = process.env.AGENT_DECK_RELAY, WebSocketImpl = WebSocket, now = Date.now, version = '0.1.0',
+  handshakeTimeout = 10000,
 }) {
   const file = path.join(home, 'phone.json');
   let state = null; // { key, relay, enabled, mode, lastStatus }
@@ -39,11 +71,17 @@ export function createPhone({
   const inflight = new Set(); // sent to the relay, not yet acknowledged
   const events = new Map(); // pendingId -> hookEvent, for prompts sent or in flight
 
+  const changed = () => { try { onChange(); } catch { log('phone: onChange failed'); } };
   const save = () => {
-    fs.mkdirSync(home, { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
-    fs.renameSync(tmp, file);
+    try {
+      fs.mkdirSync(home, { recursive: true });
+      fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+      fs.renameSync(tmp, file);
+    } catch {
+      log('phone: could not save phone.json');
+      try { fs.rmSync(tmp, { force: true }); } catch { /* nothing to remove */ }
+    }
   };
   const load = () => {
     let s = null;
@@ -51,7 +89,7 @@ export function createPhone({
     const ok = Boolean(s) && typeof s === 'object';
     state = {
       key: ok && typeof s.key === 'string' && s.key.length === 43 ? s.key : crypto.randomBytes(32).toString('base64url'),
-      relay: ok && validRelay(s.relay) ? s.relay : '',
+      relay: ok ? (cleanRelay(s.relay) ?? '') : '',
       enabled: ok && s.enabled === true,
       mode: ok && MODES.has(s.mode) ? s.mode : 'away',
       lastStatus: ok && s.lastStatus && typeof s.lastStatus === 'object' ? s.lastStatus : null,
@@ -59,7 +97,9 @@ export function createPhone({
     save();
   };
 
-  const relayAddr = () => (state?.relay || relayUrl || DEFAULT_RELAY_URL || '');
+  const rawRelay = () => (state?.relay || relayUrl || DEFAULT_RELAY_URL || '');
+  const relayAddr = () => cleanRelay(rawRelay()) ?? '';
+  const relayBad = () => cleanRelay(rawRelay()) === null;
   const status = () => state?.lastStatus || {};
   const linkedNow = () => status().linked === true;
 
@@ -81,7 +121,7 @@ export function createPhone({
       balanceMicroUsd: st.balanceMicroUsd ?? null,
       billing: st.billing ?? null,
       botNumber: st.botNumber ?? null,
-      error,
+      error: error || (relayBad() ? 'bad-relay' : ''),
       sent: { ...sent },
     };
   }
@@ -109,12 +149,13 @@ export function createPhone({
     if (!url) return;
     let sock;
     try {
-      sock = new WebSocketImpl(url, { headers: { Authorization: 'Bearer ' + state.key } });
+      sock = new WebSocketImpl(url, { headers: { Authorization: 'Bearer ' + state.key }, handshakeTimeout });
     } catch {
       scheduleReconnect();
       return;
     }
     ws = sock;
+    armDead(); // a handshake that never completes is cut off too
     sock.on('open', () => {
       if (ws !== sock) return;
       connected = true;
@@ -123,7 +164,7 @@ export function createPhone({
       send({ type: 'hello', machine: machineName, version });
       pingTimer = setInterval(() => { try { sock.send('ping'); } catch { /* closing */ } }, PING_MS);
       armDead();
-      onChange();
+      changed();
     });
     sock.on('message', (data) => {
       if (ws !== sock) return;
@@ -132,7 +173,8 @@ export function createPhone({
       if (text === 'pong') return;
       let msg;
       try { msg = JSON.parse(text); } catch { return; }
-      if (msg && typeof msg === 'object') onRelay(msg);
+      if (!msg || typeof msg !== 'object') return;
+      try { onRelay(msg); } catch { log('phone: handler failed'); }
     });
     sock.on('error', () => { /* 'close' follows */ });
     sock.on('close', () => {
@@ -144,7 +186,7 @@ export function createPhone({
       clearTimeout(deadTimer); deadTimer = null;
       inflight.clear(); // a reconnect re-sends; the relay dedupes
       if (was) log('phone: disconnected');
-      onChange();
+      changed();
       scheduleReconnect();
     });
   }
@@ -177,38 +219,44 @@ export function createPhone({
           if (!wasLinked) { state.enabled = true; log('phone: linked'); }
         }
         save();
-        onChange();
+        changed();
         break;
       }
       case 'link-code':
         code = { code: msg.code, expiresAt: msg.expiresAt, botNumber: msg.botNumber };
         error = '';
-        onChange();
+        changed();
         break;
       case 'error':
         error = String(msg.reason ?? 'error');
-        onChange();
+        changed();
         break;
       case 'prompt-sent':
         if (!inflight.has(msg.pendingId) && !(msg.pendingId in sent)) break;
         inflight.delete(msg.pendingId);
         sent[msg.pendingId] = 'sent';
         log('phone: prompt sent');
-        if (events.get(msg.pendingId) === 'PermissionRequest') extendHold(msg.pendingId);
-        onChange();
+        if (events.get(msg.pendingId) === 'PermissionRequest') {
+          try { extendHold(msg.pendingId); } catch { log('phone: extendHold failed'); }
+        }
+        changed();
         break;
       case 'prompt-failed':
         inflight.delete(msg.pendingId);
         sent[msg.pendingId] = 'failed:' + String(msg.reason ?? 'unknown');
         log('phone: prompt failed');
-        onChange();
+        changed();
         break;
       case 'decide': {
+        const id = msg.pendingId;
+        const ack = (ok, reason) => send(reason ? { type: 'decide-ack', pendingId: id, ok, reason } : { type: 'decide-ack', pendingId: id, ok });
+        const known = typeof id === 'string' && (sent[id] === 'sent' || inflight.has(id));
+        if (!state.enabled || !linkedNow() || !known) { ack(false, 'unknown'); break; }
+        const decision = cleanDecision(msg.decision);
+        if (!decision) { ack(false, 'bad-decision'); break; }
         let r;
-        try { r = decide(msg.pendingId, msg.decision); } catch { r = { ok: false, reason: 'error' }; }
-        const ack = { type: 'decide-ack', pendingId: msg.pendingId, ok: Boolean(r?.ok) };
-        if (r?.reason !== undefined) ack.reason = r.reason;
-        send(ack);
+        try { r = decide(id, decision); } catch { r = { ok: false, reason: 'error' }; }
+        if (r?.ok) ack(true); else ack(false, r?.reason ?? 'error');
         log('phone: decision received');
         break;
       }
@@ -247,7 +295,7 @@ export function createPhone({
     delete sent[pendingId];
     inflight.delete(pendingId);
     events.delete(pendingId);
-    if (known) onChange();
+    if (known) changed();
   }
 
   function panelMessage(msg) {
@@ -259,30 +307,38 @@ export function createPhone({
         } else {
           error = 'relay-unreachable';
         }
-        onChange();
+        changed();
         break;
       case 'phone-unlink':
         if (send({ type: 'unlink' })) error = ''; else error = 'relay-unreachable';
         state.enabled = false;
         save();
-        onChange();
+        changed();
         break;
       case 'phone-cancel-link':
         code = null;
-        onChange();
+        changed();
         break;
       case 'phone-settings': {
         const before = relayAddr();
         if (typeof msg.enabled === 'boolean') state.enabled = msg.enabled;
         if (MODES.has(msg.mode)) state.mode = msg.mode;
-        if (validRelay(msg.relay)) state.relay = msg.relay;
-        save();
-        if (relayAddr() !== before && !stopped) {
-          disconnect();
-          backoff = BACKOFF_MIN_MS;
-          connect();
+        if (msg.relay !== undefined) {
+          const r = cleanRelay(msg.relay);
+          if (r === null) error = 'bad-relay'; else { state.relay = r; if (error === 'bad-relay') error = ''; }
         }
-        onChange();
+        if (relayAddr() !== before) {
+          // A different relay means linking again; the old relay never sees the new key.
+          state.key = crypto.randomBytes(32).toString('base64url');
+          state.lastStatus = null;
+          state.enabled = false;
+          code = null;
+          for (const k of Object.keys(sent)) delete sent[k];
+          events.clear();
+          if (!stopped) { disconnect(); backoff = BACKOFF_MIN_MS; save(); connect(); }
+        }
+        save();
+        changed();
         break;
       }
       default:
